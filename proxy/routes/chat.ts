@@ -64,11 +64,11 @@ async function handleToolsChatCompletions(
     const toolLoop = findRepeatedToolCallLoop(messages);
     if (toolLoop) {
         logger.warn(
-            `[tool-loop] detected repeated tool call "${toolLoop.name}" in /v1/chat/completions; aborting`
+            `[tool-loop] detected repeated tool call "${toolLoop.name}" in /v1/chat/completions; aborting (threshold ${MAX_REPEATED_TOOL_LOOPS + 1}; set OPENCODE_TOOL_LOOP_LIMIT or DISABLE_TOOL_LOOP_CHECK=1 to tune/disable)`
         );
         return res.status(422).json({
             error: {
-                message: `Tool call loop detected: the model requested the same tool call ("${toolLoop.name}") ${MAX_REPEATED_TOOL_LOOPS + 1} times in a row. Aborting to prevent an infinite loop.`,
+                message: `Tool call loop detected: the model requested the same tool call ("${toolLoop.name}") ${MAX_REPEATED_TOOL_LOOPS + 1} times in a row. Aborting to prevent an infinite loop. Set OPENCODE_TOOL_LOOP_LIMIT to raise the threshold or DISABLE_TOOL_LOOP_CHECK=1 to disable.`,
                 type: 'invalid_request_error'
             }
         });

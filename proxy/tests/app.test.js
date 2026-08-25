@@ -93,6 +93,7 @@ const { default: app } = await import('../app.ts');
 const { createOpencodeClient } = await import('@opencode-ai/sdk');
 const { clearProviderCache, restoreFoldedReasoning, normalizeToolDefinitions, readAuthStoreKey } =
     await import('../model-gateway.ts');
+const { MAX_REPEATED_TOOL_LOOPS } = await import('../utils.ts');
 
 // Builds a ReadableStream with OpenAI SSE chat completion chunks for mocking
 // the direct model-gateway HTTP call.
@@ -1012,22 +1013,19 @@ describe('Proxy OpenAI API', () => {
             ]
         });
 
+        // Build a loop that exceeds MAX_REPEATED_TOOL_LOOPS (threshold+1 identical calls)
+        const messages = [{ role: 'user', content: 'weather?' }];
+        for (let i = 0; i < MAX_REPEATED_TOOL_LOOPS + 1; i++) {
+            messages.push(assistant());
+            if (i < MAX_REPEATED_TOOL_LOOPS) messages.push({ role: 'tool', tool_call_id: `c${i}`, content: 'x' });
+        }
+
         const res = await request(app)
             .post('/v1/chat/completions')
             .set('Authorization', 'Bearer test-password')
             .send({
                 model: 'opencode/big-pickle',
-                messages: [
-                    { role: 'user', content: 'weather?' },
-                    assistant(),
-                    { role: 'tool', tool_call_id: 'c1', content: 'x' },
-                    assistant(),
-                    { role: 'tool', tool_call_id: 'c2', content: 'x' },
-                    assistant(),
-                    { role: 'tool', tool_call_id: 'c3', content: 'x' },
-                    assistant(),
-                    { role: 'tool', tool_call_id: 'c4', content: 'x' }
-                ],
+                messages,
                 tools: [{ type: 'function', function: { name: 'get_weather' } }]
             });
 
@@ -1111,7 +1109,7 @@ describe('Proxy OpenAI API', () => {
                 ],
                 usage: {}
             });
-        for (let i = 0; i < 4; i++) {
+        for (let i = 0; i < MAX_REPEATED_TOOL_LOOPS + 1; i++) {
             global.fetch.mockResolvedValueOnce(toolCallResponse());
         }
 
@@ -1127,9 +1125,9 @@ describe('Proxy OpenAI API', () => {
         let id = first.body.id;
         let callId = first.body.output[0].call_id;
 
-        // The model keeps repeating the identical tool call: 3 continuations
-        // are allowed, the 4th identical call trips the guard.
-        for (let i = 0; i < 3; i++) {
+        // The model keeps repeating the identical tool call: MAX_REPEATED_TOOL_LOOPS continuations
+        // are allowed, the next identical call trips the guard.
+        for (let i = 0; i < MAX_REPEATED_TOOL_LOOPS; i++) {
             const next = await request(app)
                 .post('/v1/responses')
                 .set('Authorization', 'Bearer test-password')
@@ -1146,7 +1144,7 @@ describe('Proxy OpenAI API', () => {
             callId = next.body.output[0].call_id;
         }
 
-        // The 4th identical tool call (same name and arguments) trips the guard.
+        // The next identical tool call (same name and arguments) trips the guard.
         const fourth = await request(app)
             .post('/v1/responses')
             .set('Authorization', 'Bearer test-password')
