@@ -2,6 +2,7 @@
     "name": "opencode-proxy",
     "version": "1.0.0",
     "description": "OpenAI-compatible proxy for OpenCode",
+    "license": "MIT",
     "main": "index.ts",
     "type": "module",
     "engines": {
