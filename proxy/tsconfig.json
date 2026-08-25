@@ -1,0 +1,30 @@
+{
+    "compilerOptions": {
+        "target": "ES2023",
+        "lib": ["ES2023"],
+        "module": "NodeNext",
+        "moduleResolution": "NodeNext",
+
+        // Node.js runs TypeScript natively via type stripping (no build step).
+        // Import specifiers carry the real ".ts" extension, and the compiler must
+        // reject any non-erasable syntax (enum, namespace, parameter properties)
+        // that the native runtime cannot strip.
+        "allowImportingTsExtensions": true,
+        "rewriteRelativeImportExtensions": true,
+        "erasableSyntaxOnly": true,
+        "verbatimModuleSyntax": true,
+        "noEmit": true,
+
+        "strict": true,
+        "noImplicitOverride": true,
+        "noFallthroughCasesInSwitch": true,
+        "noUncheckedIndexedAccess": true,
+        "forceConsistentCasingInFileNames": true,
+        "esModuleInterop": true,
+        "skipLibCheck": true,
+        "resolveJsonModule": true,
+
+        "types": ["node"]
+    },
+    "include": ["*.ts", "tests/**/*.js"]
+}

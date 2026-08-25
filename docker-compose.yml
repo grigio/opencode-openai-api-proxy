@@ -1,0 +1,37 @@
+services:
+  opencode:
+    build: .
+    image: local/opencode-openai-api-proxy:latest
+    ports:
+      - "${PROXY_PORT:-4096}:${PROXY_PORT:-4096}" # OpenAI Proxy
+      - "4097:4097" # Native OpenCode API
+    environment:
+      - OPENCODE_SERVER_PASSWORD=${OPENCODE_PASSWORD:-admin}
+      - PROXY_HOST=${PROXY_HOST:-0.0.0.0}
+      - PROXY_PORT=${PROXY_PORT:-4096}
+      # Zen API key (generate at https://opencode.ai/auth): bootstrapped into
+      # the auth store on first run so tool calls bypass the anonymous free tier.
+      # Optional - without it the server works but is subject to free-tier limits.
+      - OPENCODE_API_KEY=${OPENCODE_API_KEY:-}
+      # Tool-calling routing: 'auto' (default) relays the client's tools straight
+      # to zen so the client executes them locally; the anonymous opencode free
+      # tier is automatically sent to zen-direct. 'agent' opts into running the
+      # server's built-in tools inside the container instead.
+      - OPENCODE_TOOL_CALLING=${OPENCODE_TOOL_CALLING:-auto}
+      # Outbound proxy (curl-style). Uncomment if your host reaches the internet
+      # through a proxy - upstream model-API calls will honor it. Loopback traffic
+      # stays direct; see README "Outbound Proxy Support".
+      - HTTPS_PROXY=${HTTPS_PROXY:-}
+      - HTTP_PROXY=${HTTP_PROXY:-}
+      - NO_PROXY=${NO_PROXY:-}
+    volumes:
+      # Persists authentication and configuration
+      - opencode_data:/home/node/.local/share/opencode
+      - opencode_config:/home/node/.config/opencode
+      # Maps your current project into the container
+      - .:/home/node/project
+    restart: unless-stopped
+
+volumes:
+  opencode_data:
+  opencode_config:
