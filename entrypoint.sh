@@ -78,11 +78,12 @@ if [[ "$1" == "opencode" && "$2" == "serve" ]]; then
     gosu node "$@" &
     SERVER_PID=$!
     
-    # Wait for the server to be responsive
-    echo "Waiting for OpenCode Server to become available..."
+    # Wait for the server to be responsive (respect OPENCODE_SERVER_PORT/TARGET_PORT, default 4097)
+    local_port=${OPENCODE_SERVER_PORT:-${TARGET_PORT:-4097}}
+    echo "Waiting for OpenCode Server to become available on ${local_port}..."
     MAX_RETRIES=30
     COUNT=0
-    while ! curl -s http://127.0.0.1:4097/global/health > /dev/null; do
+    while ! curl -s --max-time 2 http://127.0.0.1:${local_port}/global/health > /dev/null; do
         if [ $COUNT -ge $MAX_RETRIES ]; then
             echo "Timeout waiting for OpenCode Server."
             kill $SERVER_PID

@@ -1,4 +1,3 @@
-import axios from 'axios';
 import { resolveSafeImageUrl } from './ssrf.ts';
 import { logger } from './logger.ts';
 
@@ -10,6 +9,10 @@ const IMAGE_FETCH_TIMEOUT_MS = 10 * 1000;
  *
  * Only http(s) URLs to public hosts are fetched; private/loopback targets are
  * rejected to prevent SSRF. Fetches have a timeout and a size cap.
+ *
+ * Uses native fetch (undici) so outbound proxy settings (HTTPS_PROXY etc.)
+ * are honored via the global dispatcher — unlike the previous axios path which
+ * bypassed the EnvHttpProxyAgent.
  *
  * @param {string} url The image URL or data URI
  * @returns {Promise<string>} The image as a data URI
@@ -23,14 +26,27 @@ async function getImageDataUri(url: string): Promise<string> {
         throw new Error(`Refusing to fetch image from unsafe URL: ${url}`);
     }
     try {
-        const response = await axios.get(url, {
-            responseType: 'arraybuffer',
-            timeout: IMAGE_FETCH_TIMEOUT_MS,
-            maxContentLength: MAX_IMAGE_SIZE_BYTES,
-            maxBodyLength: MAX_IMAGE_SIZE_BYTES
-        });
-        const contentType = response.headers['content-type'] || 'image/jpeg';
-        const base64 = Buffer.from(response.data, 'binary').toString('base64');
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), IMAGE_FETCH_TIMEOUT_MS);
+        let response: Response;
+        try {
+            response = await fetch(url, { signal: controller.signal });
+        } finally {
+            clearTimeout(timeout);
+        }
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`);
+        }
+        const contentLength = response.headers.get('content-length');
+        if (contentLength && Number(contentLength) > MAX_IMAGE_SIZE_BYTES) {
+            throw new Error(`Image exceeds size limit (${contentLength} bytes)`);
+        }
+        const buffer = await response.arrayBuffer();
+        if (buffer.byteLength > MAX_IMAGE_SIZE_BYTES) {
+            throw new Error(`Image exceeds size limit (${buffer.byteLength} bytes)`);
+        }
+        const contentType = response.headers.get('content-type') || 'image/jpeg';
+        const base64 = Buffer.from(buffer).toString('base64');
         return `data:${contentType};base64,${base64}`;
     } catch (error) {
         logger.error(`Failed to fetch image from ${url}:`, (error as { message?: string }).message);

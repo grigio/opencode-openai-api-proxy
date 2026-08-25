@@ -160,6 +160,17 @@ function reasoningErrorHint(error: unknown): string {
     return '';
 }
 
+function sanitizeErrorMessage(msg: string): string {
+    if (!msg || typeof msg !== 'string') return 'Unknown upstream error';
+    let out = msg.slice(0, 500);
+    // Redact bearer tokens and API keys
+    out = out.replace(/Bearer\s+[A-Za-z0-9\-_=.]+/gi, 'Bearer [REDACTED]');
+    out = out.replace(/api[_-]?key\s*[:=]\s*['"]?[^'"\s]+['"]?/gi, 'api_key=[REDACTED]');
+    // Redact URLs with credentials
+    out = out.replace(/https?:\/\/[^@\s]+:[^@\s]+@[^\/\s]+/g, '[REDACTED_URL]');
+    return out;
+}
+
 function upstreamErrorInfo(error: unknown): {
     message: string;
     statusCode?: number;
@@ -179,7 +190,7 @@ function upstreamErrorInfo(error: unknown): {
     const responseError = e.response?.data?.error;
     if (responseError?.message) {
         return {
-            message: responseError.message,
+            message: sanitizeErrorMessage(responseError.message),
             type: responseError.type,
             statusCode: e.response?.status
         };
@@ -199,12 +210,16 @@ function upstreamErrorInfo(error: unknown): {
             const message = nested?.message || payload?.message;
             if (typeof message === 'string' && message) {
                 const type = nested?.type || payload?.type;
-                return { message, statusCode, type: typeof type === 'string' ? type : undefined };
+                return {
+                    message: sanitizeErrorMessage(message),
+                    statusCode,
+                    type: typeof type === 'string' ? type : undefined
+                };
             }
         } catch {}
-        return { message: raw, statusCode };
+        return { message: sanitizeErrorMessage(raw), statusCode };
     }
-    return { message: raw || 'Unknown upstream error' };
+    return { message: sanitizeErrorMessage(raw || 'Unknown upstream error') };
 }
 
 function buildResponsesToolMessages(
@@ -331,6 +346,7 @@ export {
     buildAgentToolsSystem,
     logToolFailureDiagnostics,
     reasoningErrorHint,
+    sanitizeErrorMessage,
     upstreamErrorInfo,
     buildResponsesToolMessages,
     deriveToolsFromMessages,

@@ -15,57 +15,10 @@ import type {
     ProviderGatewayInfo,
     ToolDefinition
 } from '../types.ts';
-import { normalizeResponsesUsage } from '../utils.ts';
+import { normalizeResponsesUsage, upstreamErrorInfo } from '../utils.ts';
 
 export const STREAM_CONTINUATION_NUDGE =
     'Your previous response was cut off by a connection error. Continue EXACTLY where it stopped - do not repeat or summarize anything you already produced and do not mention the interruption; just continue seamlessly.';
-
-function upstreamErrorInfo(error: unknown): {
-    message: string;
-    statusCode?: number;
-    type?: string;
-} {
-    const e = error as
-        | {
-              message?: string;
-              response?: {
-                  status?: number;
-                  data?: { error?: { message?: string; type?: string } };
-              };
-          }
-        | null
-        | undefined;
-    if (!e) return { message: 'Unknown upstream error' };
-    const responseError = e.response?.data?.error;
-    if (responseError?.message) {
-        return {
-            message: responseError.message,
-            type: responseError.type,
-            statusCode: e.response?.status
-        };
-    }
-    const raw = e.message || '';
-    const statusMatch = /^Model API error \((\d+)\)(?:: )?/.exec(raw);
-    if (statusMatch) {
-        const statusCode = Number(statusMatch[1]);
-        const tail = raw.slice(statusMatch[0].length);
-        try {
-            const payload = JSON.parse(tail) as {
-                error?: { message?: string; type?: string };
-                message?: string;
-                type?: string;
-            };
-            const nested = payload?.error;
-            const message = nested?.message || payload?.message;
-            if (typeof message === 'string' && message) {
-                const type = nested?.type || payload?.type;
-                return { message, statusCode, type: typeof type === 'string' ? type : undefined };
-            }
-        } catch {}
-        return { message: raw, statusCode };
-    }
-    return { message: raw || 'Unknown upstream error' };
-}
 
 function isToolArgsTruncated(
     toolCalls: Map<string, { id: string; name: string; arguments: string }>

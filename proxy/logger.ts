@@ -1,3 +1,5 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
+
 type LogLevel = 'debug' | 'info' | 'warn' | 'error' | 'silent';
 
 const LEVELS: Record<LogLevel, number> = {
@@ -19,23 +21,68 @@ function shouldLog(level: LogLevel): boolean {
     return LEVELS[level] >= LEVELS[currentLevel()];
 }
 
-function formatArgs(args: unknown[]): unknown[] {
-    return args;
+const requestIdStorage = new AsyncLocalStorage<string>();
+
+function getRequestId(): string | undefined {
+    return requestIdStorage.getStore();
+}
+
+function runWithRequestId<T>(id: string, fn: () => T): T {
+    return requestIdStorage.run(id, fn);
+}
+
+function formatMessage(args: unknown[]): string {
+    return args
+        .map((a) => {
+            if (typeof a === 'string') return a;
+            if (a instanceof Error) return a.message;
+            try {
+                return JSON.stringify(a);
+            } catch {
+                return String(a);
+            }
+        })
+        .join(' ');
+}
+
+function log(level: LogLevel, ...args: unknown[]): void {
+    if (!shouldLog(level)) return;
+    const requestId = getRequestId();
+    const timestamp = new Date().toISOString();
+    const message = formatMessage(args);
+
+    if ((process.env.LOG_FORMAT || '').toLowerCase() === 'json') {
+        const entry: Record<string, unknown> = { timestamp, level, message };
+        if (requestId) entry.requestId = requestId;
+        // structured log output as single JSON line
+        const line = JSON.stringify(entry);
+        if (level === 'warn') console.warn(line);
+        else if (level === 'error') console.error(line);
+        else console.log(line);
+        return;
+    }
+
+    const prefix = requestId ? `[${requestId}]` : '';
+    const line = prefix ? `${timestamp} ${prefix} ${message}` : `${timestamp} ${message}`;
+    if (level === 'warn') console.warn(line);
+    else if (level === 'error') console.error(line);
+    else console.log(line);
 }
 
 export const logger = {
     debug(...args: unknown[]): void {
-        if (shouldLog('debug')) console.log(...formatArgs(args));
+        log('debug', ...args);
     },
     info(...args: unknown[]): void {
-        if (shouldLog('info')) console.log(...formatArgs(args));
+        log('info', ...args);
     },
     warn(...args: unknown[]): void {
-        if (shouldLog('warn')) console.warn(...formatArgs(args));
+        log('warn', ...args);
     },
     error(...args: unknown[]): void {
-        if (shouldLog('error')) console.error(...formatArgs(args));
+        log('error', ...args);
     }
 };
 
+export { getRequestId, runWithRequestId, requestIdStorage };
 export type { LogLevel };

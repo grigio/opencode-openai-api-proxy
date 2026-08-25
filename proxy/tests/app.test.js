@@ -3,15 +3,6 @@ import request from 'supertest';
 import { jest } from '@jest/globals';
 
 // Define mock before importing the app
-jest.unstable_mockModule('axios', () => ({
-    default: {
-        get: jest.fn(async () => ({
-            data: Buffer.from('fake-image-data'),
-            headers: { 'content-type': 'image/png' }
-        }))
-    }
-}));
-
 jest.unstable_mockModule('@opencode-ai/sdk', () => {
     const client = {
         config: {
@@ -315,6 +306,13 @@ describe('Proxy OpenAI API', () => {
     });
 
     test('POST /v1/chat/completions should support multimodal content (images)', async () => {
+        global.fetch.mockResolvedValue({
+            ok: true,
+            status: 200,
+            headers: { get: (h: string) => (h.toLowerCase() === 'content-type' ? 'image/png' : null) },
+            arrayBuffer: async () => new TextEncoder().encode('fake-image-data').buffer
+        } as unknown as Response);
+
         const res = await request(app)
             .post('/v1/chat/completions')
             .set('Authorization', 'Bearer test-password')
@@ -339,8 +337,7 @@ describe('Proxy OpenAI API', () => {
     });
 
     test('POST /v1/chat/completions should refuse SSRF image targets (private IP)', async () => {
-        const { default: axios } = await import('axios');
-        axios.get.mockClear();
+        global.fetch.mockClear();
 
         const res = await request(app)
             .post('/v1/chat/completions')
@@ -361,16 +358,15 @@ describe('Proxy OpenAI API', () => {
                 ]
             });
 
-        // The image is skipped server-side; axios must never be called with the
+        // The image is skipped server-side; fetch must never be called with the
         // internal target, and the request still completes.
         expect(res.statusCode).toEqual(200);
-        const urls = axios.get.mock.calls.map(([u]) => u);
+        const urls = global.fetch.mock.calls.map(([u]) => String(u));
         expect(urls).not.toContain('http://169.254.169.254/latest/meta-data/');
     });
 
     test('POST /v1/chat/completions should refuse SSRF images to localhost', async () => {
-        const { default: axios } = await import('axios');
-        axios.get.mockClear();
+        global.fetch.mockClear();
 
         const res = await request(app)
             .post('/v1/chat/completions')
@@ -392,7 +388,7 @@ describe('Proxy OpenAI API', () => {
             });
 
         expect(res.statusCode).toEqual(200);
-        const urls = axios.get.mock.calls.map(([u]) => u);
+        const urls = global.fetch.mock.calls.map(([u]) => String(u));
         expect(urls).not.toContain('http://127.0.0.1:4097/global/health');
     });
 

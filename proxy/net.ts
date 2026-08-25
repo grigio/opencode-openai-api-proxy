@@ -128,7 +128,8 @@ function configureOutboundProxy(env: NodeJS.ProcessEnv = process.env): boolean {
 
     // Merge loopback into NO_PROXY and write it back under BOTH spellings so
     // every consumer sees the same exclusions: EnvHttpProxyAgent reads these
-    // variables itself, and axios (image fetches) reads them per request.
+    // variables itself, and fetch (image + gateway) reads them via the global
+    // dispatcher.
     const mergedNoProxy = withLoopbackNoProxy(proxy.noProxy);
     env.NO_PROXY = mergedNoProxy;
     env.no_proxy = mergedNoProxy;

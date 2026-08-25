@@ -1,6 +1,17 @@
 import { configureOutboundProxy } from './net.ts';
 import app from './app.ts';
 
+// Fail fast when auth is not configured: a proxy without a password would
+// otherwise serve unauthenticated requests until the first request hits the
+// middleware's 503. This check runs only when the process boots as a server
+// (index.ts), not when the app is imported as a library in tests.
+if (!process.env.OPENCODE_SERVER_PASSWORD) {
+    console.error(
+        'OPENCODE_SERVER_PASSWORD is not set. Refusing to start without authentication. Set OPENCODE_SERVER_PASSWORD and restart.'
+    );
+    process.exit(1);
+}
+
 // Outbound connections must honor the user's proxy connection (HTTPS_PROXY /
 // HTTP_PROXY / ALL_PROXY, like curl) before any upstream call can happen.
 configureOutboundProxy();

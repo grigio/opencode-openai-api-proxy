@@ -1,6 +1,7 @@
 import type { ResponseState } from './types.ts';
 
 const RESPONSE_STATE_TTL_MS = 30 * 60 * 1000;
+const RESPONSE_STATE_MAX = 1000;
 const responseState = new Map<string, ResponseState>();
 
 setInterval(() => {
@@ -13,6 +14,11 @@ setInterval(() => {
 }, 60 * 1000).unref();
 
 function storeResponseState(responseId: string, state: Omit<ResponseState, 'expiresAt'>): void {
+    if (responseState.has(responseId)) responseState.delete(responseId);
+    else if (responseState.size >= RESPONSE_STATE_MAX) {
+        const oldest = responseState.keys().next().value as string | undefined;
+        if (oldest !== undefined) responseState.delete(oldest);
+    }
     responseState.set(responseId, {
         ...state,
         expiresAt: Date.now() + RESPONSE_STATE_TTL_MS
@@ -38,5 +44,6 @@ export {
     storeResponseState,
     getResponseState,
     clearResponseState,
-    RESPONSE_STATE_TTL_MS
+    RESPONSE_STATE_TTL_MS,
+    RESPONSE_STATE_MAX
 };

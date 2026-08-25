@@ -29,6 +29,7 @@ import {
     buildAgentToolsSystem,
     gatewayUnavailableError,
     upstreamErrorInfo,
+    sanitizeErrorMessage,
     logToolFailureDiagnostics,
     reasoningErrorHint,
     normalizeResponsesUsage,
@@ -473,10 +474,11 @@ async function responsesHandler(req: Request, res: Response): Promise<Response |
                         toolError.message
                     );
                     logToolFailureDiagnostics(providerId, modelId, input, toolError);
-                    const toolErrorMessage =
+                    const toolErrorMessage = sanitizeErrorMessage(
                         toolError.response?.data?.error?.message ||
-                        toolError.message ||
-                        'Unknown error';
+                            toolError.message ||
+                            'Unknown error'
+                    );
                     return res.status(502).json({
                         error: {
                             message: `Tool calling failed for "${providerId}/${modelId}"`,
@@ -504,10 +506,11 @@ async function responsesHandler(req: Request, res: Response): Promise<Response |
                     (req.body as ResponsesBody)?.input,
                     toolError
                 );
-                const toolErrorMessage =
+                const toolErrorMessage = sanitizeErrorMessage(
                     toolError.response?.data?.error?.message ||
-                    toolError.message ||
-                    'Unknown error';
+                        toolError.message ||
+                        'Unknown error'
+                );
                 return res.status(502).json({
                     error: {
                         message: `Tool calling failed for "${providerId}/${modelId}"`,
@@ -614,8 +617,9 @@ async function responsesHandler(req: Request, res: Response): Promise<Response |
     } catch (caught) {
         const error = caught as import('../types.ts').UpstreamErrorLike;
         logger.error('Responses API Proxy Error:', error);
-        const errorMessage =
-            error.response?.data?.error?.message || error.message || 'Unknown error';
+        const errorMessage = sanitizeErrorMessage(
+            error.response?.data?.error?.message || error.message || 'Unknown error'
+        );
         return res
             .status(500)
             .json({ error: { message: 'Internal Proxy Error', details: errorMessage } });

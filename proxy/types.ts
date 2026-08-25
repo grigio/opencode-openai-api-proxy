@@ -167,10 +167,10 @@ export interface GatewayResult extends ChatCompletionResult {
 }
 
 /**
- * Shape of errors thrown by axios/upstream model-API calls, as consumed in the
- * route handlers' catch blocks. Kept structural (rather than importing axios
- * types) so app.ts and model-gateway.ts stay decoupled from the HTTP client's
- * concrete error class while still surfacing the message/cause fields.
+ * Shape of errors thrown by upstream model-API calls (fetch), as consumed in
+ * the route handlers' catch blocks. Kept structural so app.ts and
+ * model-gateway.ts stay decoupled from the HTTP client's concrete error class
+ * while still surfacing the message/cause fields.
  */
 export interface UpstreamErrorLike {
     message?: string;

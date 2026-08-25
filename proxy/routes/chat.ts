@@ -29,6 +29,7 @@ import {
     buildAgentToolsSystem,
     gatewayUnavailableError,
     upstreamErrorInfo,
+    sanitizeErrorMessage,
     logToolFailureDiagnostics,
     reasoningErrorHint,
     buildFinalMessage,
@@ -439,10 +440,11 @@ async function chatCompletionsHandler(req: Request, res: Response): Promise<Resp
                         toolError.stack?.split('\n').slice(0, 4).join(' | ')
                     );
                     logToolFailureDiagnostics(providerId, modelId, messages, toolError);
-                    const toolErrorMessage =
+                    const toolErrorMessage = sanitizeErrorMessage(
                         toolError.response?.data?.error?.message ||
-                        toolError.message ||
-                        'Unknown error';
+                            toolError.message ||
+                            'Unknown error'
+                    );
                     return res.status(502).json({
                         error: {
                             message: `Tool calling failed for "${providerId}/${modelId}"`,
@@ -478,10 +480,11 @@ async function chatCompletionsHandler(req: Request, res: Response): Promise<Resp
                     (req.body as { messages?: unknown })?.messages,
                     toolError
                 );
-                const toolErrorMessage =
+                const toolErrorMessage = sanitizeErrorMessage(
                     toolError.response?.data?.error?.message ||
-                    toolError.message ||
-                    'Unknown error';
+                        toolError.message ||
+                        'Unknown error'
+                );
                 return res.status(502).json({
                     error: {
                         message: `Tool calling failed for "${providerId}/${modelId}"`,
@@ -560,8 +563,9 @@ async function chatCompletionsHandler(req: Request, res: Response): Promise<Resp
     } catch (caught) {
         const error = caught as import('../types.ts').UpstreamErrorLike;
         logger.error('Proxy Processing Error:', error);
-        const errorMessage =
-            error.response?.data?.error?.message || error.message || 'Unknown error';
+        const errorMessage = sanitizeErrorMessage(
+            error.response?.data?.error?.message || error.message || 'Unknown error'
+        );
         res.status(500).json({ error: { message: 'Internal Proxy Error', details: errorMessage } });
     }
 }

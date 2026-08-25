@@ -1,6 +1,5 @@
-# Use Node.js LTS Slim as base (Debian-based, lightweight and compatible)
-# Node >= 23.6 required: the proxy runs natively via TS type stripping.
-FROM node:lts-slim
+# Pinned Node 24 slim - matches .nvmrc and ensures type-stripping support (Node >= 23.6)
+FROM node:24-slim
 
 # Pinned versions for reproducible builds
 ARG OPENCODE_VERSION=1.18.16
@@ -42,9 +41,9 @@ WORKDIR /home/node/project
 
 # Setup Proxy (separate layers to leverage build cache):
 # 1. Manifests only -> install production dependencies from the lockfile.
-# 2. Then the source code.
+# 2. Then the source code (single layer, respects .dockerignore).
 COPY proxy/package.json proxy/package-lock.json /usr/src/proxy/
-RUN cd /usr/src/proxy && npm ci --omit=dev
+RUN cd /usr/src/proxy && npm ci --omit=dev && npm cache clean --force
 COPY proxy/*.ts /usr/src/proxy/
 COPY proxy/routes /usr/src/proxy/routes
 COPY proxy/streaming /usr/src/proxy/streaming
@@ -63,9 +62,10 @@ ENV OPENCODE_SERVER_PORT=4097
 # opencode_data volume).
 ENV HOME=/home/node
 
-# Healthcheck: the /health endpoint does not require authentication
+# Healthcheck: the /health endpoint does not require authentication.
+# Uses PROXY_PORT env if overridden; falls back to 4096.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
-  CMD curl -fsS http://127.0.0.1:4096/health > /dev/null || exit 1
+  CMD curl -fsS http://127.0.0.1:${PROXY_PORT:-4096}/health > /dev/null || exit 1
 
 # Set the entrypoint script
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

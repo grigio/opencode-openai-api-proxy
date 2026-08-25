@@ -43,7 +43,7 @@ const DEFAULT_UPSTREAM_TIMEOUT_MS = Math.max(
 // identity. This does not bypass paid-model auth: the identity is only ever
 // attached to keyless "public" (anonymous free tier) requests.
 // ---------------------------------------------------------------------------
-const ZEN_CLIENT_VERSION = process.env.ZEN_CLIENT_VERSION || '1.18.13';
+const ZEN_CLIENT_VERSION = process.env.ZEN_CLIENT_VERSION || '1.18.16';
 const zenIdentity = {
     session: `ses_${crypto.randomBytes(10).toString('hex')}`,
     project: 'global'
@@ -110,7 +110,17 @@ function isProviderAnonymous(info: ProviderGatewayInfo | null | undefined): bool
     if (!info) return false;
     return !info.apiKey || info.apiKey === REDACTED_KEY_PLACEHOLDER;
 }
+const PROVIDER_CACHE_MAX = 200;
 const providerCache = new Map<string, { info: ProviderGatewayInfo; expiresAt: number }>();
+
+function boundedSet<K, V>(map: Map<K, V>, key: K, value: V, max: number): void {
+    if (map.has(key)) map.delete(key);
+    else if (map.size >= max) {
+        const oldest = map.keys().next().value as K | undefined;
+        if (oldest !== undefined) map.delete(oldest);
+    }
+    map.set(key, value);
+}
 
 // ---------------------------------------------------------------------------
 // Reasoning memory for tool-call continuations
@@ -128,6 +138,7 @@ const providerCache = new Map<string, { info: ProviderGatewayInfo; expiresAt: nu
 // before any reasoning is injected.
 // ---------------------------------------------------------------------------
 const REASONING_MEMORY_TTL_MS = 30 * 60 * 1000;
+const REASONING_MEMORY_MAX = 1000;
 interface ReasoningMemoryEntry extends ReasoningMeta {
     content: string;
     expiresAt: number;
@@ -191,16 +202,21 @@ function rememberToolCallReasoning(
     meta: ReasoningMeta = {}
 ): void {
     if (!toolCallId || typeof reasoningContent !== 'string' || !reasoningContent) return;
-    reasoningMemory.set(toolCallId, {
-        content: reasoningContent,
-        modelKey: String(meta.modelKey || ''),
-        functionName: String(meta.functionName || ''),
-        functionArguments:
-            typeof meta.functionArguments === 'string'
-                ? meta.functionArguments
-                : JSON.stringify(meta.functionArguments ?? null),
-        expiresAt: Date.now() + REASONING_MEMORY_TTL_MS
-    });
+    boundedSet(
+        reasoningMemory,
+        toolCallId,
+        {
+            content: reasoningContent,
+            modelKey: String(meta.modelKey || ''),
+            functionName: String(meta.functionName || ''),
+            functionArguments:
+                typeof meta.functionArguments === 'string'
+                    ? meta.functionArguments
+                    : JSON.stringify(meta.functionArguments ?? null),
+            expiresAt: Date.now() + REASONING_MEMORY_TTL_MS
+        },
+        REASONING_MEMORY_MAX
+    );
 }
 
 /**
@@ -365,7 +381,7 @@ async function getProviderInfo(
     const api = model?.api || {};
 
     const options = (provider.options || {}) as Record<string, string | undefined>;
-    const baseUrl = (api.url || options.url || options.baseURL || '').replace(/\/+$/, '');
+    let baseUrl = (api.url || options.url || options.baseURL || '').replace(/\/+$/, '');
     // The opencode server's provider catalog is a cached snapshot (models.dev
     // sync), so models released after the server image was built/started are
     // missing from it - the lookup above yields no baseUrl and would fail every
@@ -375,8 +391,9 @@ async function getProviderInfo(
     let catalogMiss = false;
     if (!baseUrl && providerId === 'opencode') {
         catalogMiss = true;
+        baseUrl = zenBaseUrl();
         logger.warn(
-            `[provider] opencode/${modelId}: not found in the OpenCode server catalog (stale snapshot?) - falling back to the zen endpoint ${zenBaseUrl()}`
+            `[provider] opencode/${modelId}: not found in the OpenCode server catalog (stale snapshot?) - falling back to the zen endpoint ${baseUrl}`
         );
     }
     if (!baseUrl && !catalogMiss) return null;
@@ -416,7 +433,7 @@ async function getProviderInfo(
               (model?.capabilities as { attachment?: boolean } | undefined)?.attachment ??
               (model?.options as { attachment?: boolean } | undefined)?.attachment)
     };
-    providerCache.set(cacheKey, { info, expiresAt: Date.now() + PROVIDER_CACHE_TTL_MS });
+    boundedSet(providerCache, cacheKey, { info, expiresAt: Date.now() + PROVIDER_CACHE_TTL_MS }, PROVIDER_CACHE_MAX);
     return info;
 }
 
@@ -1038,8 +1055,12 @@ async function callChatCompletions({
             } catch {
                 // ignore body read errors
             }
-            const message = detail
-                ? `Model API error (${res.status}): ${detail.slice(0, 500)}`
+            const sanitizedDetail = detail
+                .slice(0, 500)
+                .replace(/Bearer\s+[A-Za-z0-9\-_=.]+/gi, 'Bearer [REDACTED]')
+                .replace(/api[_-]?key\s*[:=]\s*['"]?[^'"\s]+['"]?/gi, 'api_key=[REDACTED]');
+            const message = sanitizedDetail
+                ? `Model API error (${res.status}): ${sanitizedDetail}`
                 : `Model API error (${res.status})`;
             if (
                 !stream &&
