@@ -46,6 +46,8 @@ WORKDIR /home/node/project
 COPY proxy/package.json proxy/package-lock.json /usr/src/proxy/
 RUN cd /usr/src/proxy && npm ci --omit=dev
 COPY proxy/*.ts /usr/src/proxy/
+COPY proxy/routes /usr/src/proxy/routes
+COPY proxy/streaming /usr/src/proxy/streaming
 
 # Expose ports (4096 OpenAI Proxy, 4097 native OpenCode API)
 EXPOSE 4096 4097
