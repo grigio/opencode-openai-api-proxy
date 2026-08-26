@@ -292,6 +292,28 @@ The image is built on top of `node:lts-slim` to ensure it is lightweight and com
 docker build -t local/opencode-openai-api-proxy .
 ```
 
+### Pull from GHCR (prebuilt image)
+
+Images are built automatically and pushed to GitHub Container Registry on every tag:
+
+```bash
+docker pull ghcr.io/grigio/opencode-openai-api-proxy:latest
+```
+
+Available tags for each release (e.g. `v0.0.1`):
+
+| Tag          | Example  | Notes                       |
+| ------------ | -------- | --------------------------- |
+| `latest`     | `:latest`| Latest `v*` release         |
+| Full version | `:0.0.1` | Exact release               |
+| Major.minor  | `:0.0`   | Rolling minor for a release |
+| Major        | `:0`     | Rolling major for a release |
+
+Images are multi-arch (`linux/amd64`, `linux/arm64`). The publish workflow lives in
+[`.github/workflows/docker-publish.yml`](./.github/workflows/docker-publish.yml) and
+authenticates to GHCR with the repository's `GITHUB_TOKEN` (no extra secrets needed).
+
+
 ### Run the proxy natively (without Docker)
 You still need a running OpenCode server on `localhost:4097` (or point the
 proxy elsewhere with `TARGET_PORT`), plus a `.config/opencode/auth.json` for the
