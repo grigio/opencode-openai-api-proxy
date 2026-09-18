@@ -6,7 +6,7 @@ import {
     callChatCompletionsWithImageFallback,
     modelKeyOf,
     rememberToolCallReasoning,
-    zenIdentityHeaders,
+    getZenIdentityHeaders,
     ensureZenSystemPrompt,
     normalizeSamplingParams,
     zenBaseUrl
@@ -38,7 +38,7 @@ import {
     deriveToolsFromMessages,
     findRepeatedToolCallLoop,
     buildResponsesToolMessages,
-    MAX_REPEATED_TOOL_LOOPS,
+    getMaxRepeatedToolLoops,
     SERVER_AGENT_TOOLS,
     AGENT_TOOLS_ENABLED
 } from '../utils.ts';
@@ -106,12 +106,13 @@ async function handleToolsResponses(
 
     const toolLoop = findRepeatedToolCallLoop(messages);
     if (toolLoop) {
+        const threshold = getMaxRepeatedToolLoops() + 1;
         logger.warn(
-            `[tool-loop] detected repeated tool call "${toolLoop.name}" in /v1/responses continuation; aborting (threshold ${MAX_REPEATED_TOOL_LOOPS + 1}; set OPENCODE_TOOL_LOOP_LIMIT or DISABLE_TOOL_LOOP_CHECK=1 to tune/disable)`
+            `[tool-loop] detected repeated tool call "${toolLoop.name}" in /v1/responses continuation; aborting (threshold ${threshold}; set OPENCODE_TOOL_LOOP_LIMIT or DISABLE_TOOL_LOOP_CHECK=1 to tune/disable)`
         );
         return res.status(422).json({
             error: {
-                message: `Tool call loop detected: the model requested the same tool call ("${toolLoop.name}") ${MAX_REPEATED_TOOL_LOOPS + 1} times in a row. Aborting to prevent an infinite loop. Set OPENCODE_TOOL_LOOP_LIMIT to raise the threshold or DISABLE_TOOL_LOOP_CHECK=1 to disable.`,
+                message: `Tool call loop detected: the model requested the same tool call ("${toolLoop.name}") ${threshold} times in a row. Aborting to prevent an infinite loop. Set OPENCODE_TOOL_LOOP_LIMIT to raise the threshold or DISABLE_TOOL_LOOP_CHECK=1 to disable.`,
                 type: 'invalid_request_error'
             }
         });
@@ -136,6 +137,7 @@ async function handleToolsResponses(
         );
     }
 
+    const identityHeaders = zenDirectBaseUrl ? await getZenIdentityHeaders() : undefined;
     const { data, messagesUsed } = await callChatCompletionsWithImageFallback({
         ...providerInfo,
         messages,
@@ -145,8 +147,8 @@ async function handleToolsResponses(
         stream: false,
         signal: clientAbortSignal(req),
         ...sampling,
-        ...(zenDirectBaseUrl
-            ? { baseUrl: zenDirectBaseUrl, apiKey: 'public', identityHeaders: zenIdentityHeaders() }
+        ...(zenDirectBaseUrl && identityHeaders
+            ? { baseUrl: zenDirectBaseUrl, apiKey: null, identityHeaders }
             : {})
     });
 
@@ -403,12 +405,13 @@ async function responsesHandler(req: Request, res: Response): Promise<Response |
                         });
                     const toolLoop = findRepeatedToolCallLoop(messages);
                     if (toolLoop) {
+                        const threshold = getMaxRepeatedToolLoops() + 1;
                         logger.warn(
-                            `[tool-loop] detected repeated tool call "${toolLoop.name}" in /v1/responses continuation (agent path); aborting (threshold ${MAX_REPEATED_TOOL_LOOPS + 1}; set OPENCODE_TOOL_LOOP_LIMIT or DISABLE_TOOL_LOOP_CHECK=1 to tune/disable)`
+                            `[tool-loop] detected repeated tool call "${toolLoop.name}" in /v1/responses continuation (agent path); aborting (threshold ${threshold}; set OPENCODE_TOOL_LOOP_LIMIT or DISABLE_TOOL_LOOP_CHECK=1 to tune/disable)`
                         );
                         return res.status(422).json({
                             error: {
-                                message: `Tool call loop detected: the model requested the same tool call ("${toolLoop.name}") ${MAX_REPEATED_TOOL_LOOPS + 1} times in a row. Aborting to prevent an infinite loop. Set OPENCODE_TOOL_LOOP_LIMIT to raise the threshold or DISABLE_TOOL_LOOP_CHECK=1 to disable.`,
+                                message: `Tool call loop detected: the model requested the same tool call ("${toolLoop.name}") ${threshold} times in a row. Aborting to prevent an infinite loop. Set OPENCODE_TOOL_LOOP_LIMIT to raise the threshold or DISABLE_TOOL_LOOP_CHECK=1 to disable.`,
                                 type: 'invalid_request_error'
                             }
                         });
@@ -515,7 +518,10 @@ async function responsesHandler(req: Request, res: Response): Promise<Response |
                         const messages = agentResponsesMessages(input, instructions);
                         if (messages.length === 0)
                             return res.status(400).json({
-                                error: { message: 'input is required', type: 'invalid_request_error' }
+                                error: {
+                                    message: 'input is required',
+                                    type: 'invalid_request_error'
+                                }
                             });
                         const { allParts, fullPromptText, systemPrompt } =
                             await buildPromptPartsAndSystem(messages);
@@ -570,7 +576,10 @@ async function responsesHandler(req: Request, res: Response): Promise<Response |
                             })
                         );
                     } catch (retryErr) {
-                        logger.error('Server-agent retry after FreeTierError also failed:', (retryErr as Error).message);
+                        logger.error(
+                            'Server-agent retry after FreeTierError also failed:',
+                            (retryErr as Error).message
+                        );
                     }
                 }
                 logger.error('Responses tool calling proxy error:', toolError.message);
@@ -581,9 +590,7 @@ async function responsesHandler(req: Request, res: Response): Promise<Response |
                     toolError
                 );
                 const toolErrorMessage = sanitizeErrorMessage(
-                    toolError.response?.data?.error?.message ||
-                        toolError.message ||
-                        'Unknown error'
+                    toolError.response?.data?.error?.message || toolError.message || 'Unknown error'
                 );
                 return res.status(502).json({
                     error: {

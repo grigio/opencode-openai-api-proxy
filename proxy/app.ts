@@ -6,7 +6,7 @@ import { handleModels } from './routes/models.ts';
 import { chatCompletionsHandler } from './routes/chat.ts';
 import { responsesHandler } from './routes/responses.ts';
 
-const MAX_BODY_BYTES = 1024 * 1024 * (parseInt(process.env.MAX_BODY_MB || '50', 10) || 50);
+const MAX_BODY_BYTES = 1024 * 1024 * (parseInt(process.env.MAX_BODY_MB || '5', 10) || 5);
 
 const app = express();
 

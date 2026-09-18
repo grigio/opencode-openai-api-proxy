@@ -6,7 +6,7 @@ import {
     newChatCompletionId,
     modelKeyOf,
     rememberToolCallReasoning,
-    zenIdentityHeaders,
+    getZenIdentityHeaders,
     ensureZenSystemPrompt,
     normalizeSamplingParams,
     zenBaseUrl
@@ -35,9 +35,9 @@ import {
     reasoningErrorHint,
     buildFinalMessage,
     findRepeatedToolCallLoop,
+    getMaxRepeatedToolLoops,
     SERVER_AGENT_TOOLS,
-    AGENT_TOOLS_ENABLED,
-    MAX_REPEATED_TOOL_LOOPS
+    AGENT_TOOLS_ENABLED
 } from '../utils.ts';
 import { logger } from '../logger.ts';
 
@@ -64,12 +64,13 @@ async function handleToolsChatCompletions(
 
     const toolLoop = findRepeatedToolCallLoop(messages);
     if (toolLoop) {
+        const threshold = getMaxRepeatedToolLoops() + 1;
         logger.warn(
-            `[tool-loop] detected repeated tool call "${toolLoop.name}" in /v1/chat/completions; aborting (threshold ${MAX_REPEATED_TOOL_LOOPS + 1}; set OPENCODE_TOOL_LOOP_LIMIT or DISABLE_TOOL_LOOP_CHECK=1 to tune/disable)`
+            `[tool-loop] detected repeated tool call "${toolLoop.name}" in /v1/chat/completions; aborting (threshold ${threshold}; set OPENCODE_TOOL_LOOP_LIMIT or DISABLE_TOOL_LOOP_CHECK=1 to tune/disable)`
         );
         return res.status(422).json({
             error: {
-                message: `Tool call loop detected: the model requested the same tool call ("${toolLoop.name}") ${MAX_REPEATED_TOOL_LOOPS + 1} times in a row. Aborting to prevent an infinite loop. Set OPENCODE_TOOL_LOOP_LIMIT to raise the threshold or DISABLE_TOOL_LOOP_CHECK=1 to disable.`,
+                message: `Tool call loop detected: the model requested the same tool call ("${toolLoop.name}") ${threshold} times in a row. Aborting to prevent an infinite loop. Set OPENCODE_TOOL_LOOP_LIMIT to raise the threshold or DISABLE_TOOL_LOOP_CHECK=1 to disable.`,
                 type: 'invalid_request_error'
             }
         });
@@ -144,7 +145,7 @@ async function handleZenDirectChat(
     const messages: ChatMessage[] = ensureZenSystemPrompt(
         (body as { messages?: ChatMessage[] })?.messages || []
     );
-    const identityHeaders = zenIdentityHeaders();
+    const identityHeaders = await getZenIdentityHeaders();
     const sampling = normalizeSamplingParams(body as Record<string, unknown>);
 
     if ((req.body as { stream?: boolean })?.stream) {
@@ -153,7 +154,7 @@ async function handleZenDirectChat(
 
     const { data } = await callChatCompletionsWithImageFallback({
         baseUrl: zenBaseUrl(),
-        apiKey: 'public',
+        apiKey: null,
         modelId,
         messages,
         tools,
@@ -206,6 +207,7 @@ async function handleZenDirectChatStream(
         (body as { messages?: ChatMessage[] })?.messages || []
     );
     const sampling = normalizeSamplingParams(body as Record<string, unknown>);
+    const identityHeaders = await getZenIdentityHeaders();
 
     return streamChatCompletionsWithResumption({
         req,
@@ -217,7 +219,7 @@ async function handleZenDirectChatStream(
         makeUpstream: (activeMessages) =>
             callChatCompletionsWithImageFallback({
                 baseUrl: zenBaseUrl(),
-                apiKey: 'public',
+                apiKey: null,
                 modelId,
                 messages: activeMessages,
                 tools,
@@ -225,7 +227,7 @@ async function handleZenDirectChatStream(
                 parallelToolCalls,
                 stream: true,
                 signal: clientAbortSignal(req),
-                identityHeaders: zenIdentityHeaders(),
+                identityHeaders,
                 supportsImages,
                 ...sampling
             }) as Promise<{
@@ -481,7 +483,9 @@ async function chatCompletionsHandler(req: Request, res: Response): Promise<Resp
                     );
                     // Retry once via server-agent
                     try {
-                        const agentBuild = await buildPromptPartsAndSystem(messages as ChatMessage[]);
+                        const agentBuild = await buildPromptPartsAndSystem(
+                            messages as ChatMessage[]
+                        );
                         const agentSystem = buildAgentToolsSystem(
                             agentBuild.systemPrompt,
                             tools as import('../types.ts').ToolDefinition[] | undefined
@@ -516,7 +520,10 @@ async function chatCompletionsHandler(req: Request, res: Response): Promise<Resp
                             })
                         );
                     } catch (retryErr) {
-                        logger.error('Server-agent retry after FreeTierError also failed:', (retryErr as Error).message);
+                        logger.error(
+                            'Server-agent retry after FreeTierError also failed:',
+                            (retryErr as Error).message
+                        );
                     }
                 }
                 logger.error(
@@ -535,9 +542,7 @@ async function chatCompletionsHandler(req: Request, res: Response): Promise<Resp
                     toolError
                 );
                 const toolErrorMessage = sanitizeErrorMessage(
-                    toolError.response?.data?.error?.message ||
-                        toolError.message ||
-                        'Unknown error'
+                    toolError.response?.data?.error?.message || toolError.message || 'Unknown error'
                 );
                 return res.status(502).json({
                     error: {

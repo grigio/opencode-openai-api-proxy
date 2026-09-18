@@ -235,23 +235,47 @@ async function consumeV2StreamEvents({
                     // Filter events for this session
                     if (evtData.sessionID && evtData.sessionID !== sessionId) continue;
 
-                    // Handle v2 event types
-                    if (evtType === 'session.text.delta') {
-                        const delta = evtData.delta as string;
+                    // Handle v2 event types (both legacy and next.*)
+                    if (
+                        evtType === 'session.text.delta' ||
+                        evtType === 'session.next.text.delta' ||
+                        evtType === 'session.reasoning.delta' ||
+                        evtType === 'session.next.reasoning.delta'
+                    ) {
+                        const delta = (evtData.delta as string) || (evtData.text as string);
                         if (delta) {
-                            if (state.insideReasoning) {
-                                onReasoningEnd();
-                                state.insideReasoning = false;
+                            // Reasoning deltas are streamed via reasoning events
+                            const isReasoning =
+                                evtType.includes('reasoning') ||
+                                (evtData.reasoning as boolean) === true;
+                            if (isReasoning) {
+                                if (!state.insideReasoning) {
+                                    onReasoningStart();
+                                    state.insideReasoning = true;
+                                }
+                                onReasoningDelta(delta);
+                                state.streamedAnything = true;
+                            } else {
+                                if (state.insideReasoning) {
+                                    onReasoningEnd();
+                                    state.insideReasoning = false;
+                                }
+                                onTextDelta(delta);
+                                state.streamedAnything = true;
                             }
-                            onTextDelta(delta);
-                            state.streamedAnything = true;
                         }
-                    } else if (evtType === 'session.reasoning.started') {
+                    } else if (
+                        evtType === 'session.reasoning.started' ||
+                        evtType === 'session.next.reasoning.started'
+                    ) {
                         if (!state.insideReasoning) {
                             onReasoningStart();
                             state.insideReasoning = true;
                         }
-                    } else if (evtType === 'session.reasoning.ended') {
+                    } else if (
+                        evtType === 'session.reasoning.ended' ||
+                        evtType === 'session.next.reasoning.ended'
+                    ) {
                         const text = evtData.text as string;
                         if (state.insideReasoning && text) {
                             onReasoningDelta(text);
@@ -261,7 +285,19 @@ async function consumeV2StreamEvents({
                             onReasoningEnd();
                             state.insideReasoning = false;
                         }
-                    } else if (evtType === 'session.step.ended') {
+                    } else if (
+                        evtType === 'session.next.text.started' ||
+                        evtType === 'session.next.step.started'
+                    ) {
+                        // No-op: just marks start of a new step/text block
+                    } else if (
+                        evtType === 'session.step.ended' ||
+                        evtType === 'session.next.step.ended' ||
+                        evtType === 'session.next.text.ended'
+                    ) {
+                        // session.next.text.ended is per-text block; only
+                        // session.next.step.ended with finish is terminal.
+                        if (evtType === 'session.next.text.ended') continue;
                         const finish = (evtData.finish as string) || 'stop';
                         // Only end the stream on terminal finish reasons.
                         // 'tool-calls' is intermediate — the agent will continue.
@@ -273,7 +309,7 @@ async function consumeV2StreamEvents({
                     } else if (evtType === 'session.error') {
                         const errorData = evtData.error as Record<string, unknown> | undefined;
                         const msg =
-                            (errorData?.data as Record<string, unknown>)?.message as string ||
+                            ((errorData?.data as Record<string, unknown>)?.message as string) ||
                             (errorData?.message as string) ||
                             'Session error';
                         onFail(msg);

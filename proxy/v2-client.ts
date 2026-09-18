@@ -17,7 +17,12 @@ export interface V2SessionInfo {
     id: string;
     projectID: string;
     cost: number;
-    tokens: { input: number; output: number; reasoning: number; cache: { read: number; write: number } };
+    tokens: {
+        input: number;
+        output: number;
+        reasoning: number;
+        cache: { read: number; write: number };
+    };
     time: { created: number; updated: number };
     location: { directory: string };
 }
@@ -76,7 +81,12 @@ export interface PromptMessage {
     model?: { id: string; providerID: string };
     content?: Array<{ type: string; text?: string; state?: unknown }>;
     finish?: string;
-    tokens?: { input: number; output: number; reasoning: number; cache: { read: number; write: number } };
+    tokens?: {
+        input: number;
+        output: number;
+        reasoning: number;
+        cache: { read: number; write: number };
+    };
     cost?: number;
     [k: string]: unknown;
 }
@@ -126,14 +136,21 @@ export class V2Client {
             headers: {
                 ...this.headers(),
                 'Content-Type': 'application/json',
-                ...(init?.headers as Record<string, string> ?? {}),
-            },
+                ...((init?.headers as Record<string, string>) ?? {})
+            }
         });
         if (!resp.ok) {
             const text = await resp.text().catch(() => '');
             throw new Error(`V2 API error ${resp.status} on ${path}: ${text.slice(0, 300)}`);
         }
-        const data = (await resp.json()) as T;
+        if (resp.status === 204) {
+            return { data: undefined as T, status: resp.status };
+        }
+        const text = await resp.text();
+        if (!text) {
+            return { data: undefined as T, status: resp.status };
+        }
+        const data = JSON.parse(text) as T;
         return { data, status: resp.status };
     }
 
@@ -142,8 +159,8 @@ export class V2Client {
         const resp = await fetch(url, {
             headers: {
                 ...this.headers(),
-                Accept: 'text/event-stream',
-            },
+                Accept: 'text/event-stream'
+            }
         });
         if (!resp.ok || !resp.body) return null;
         return resp.body;
@@ -151,13 +168,15 @@ export class V2Client {
 
     // ----- Session methods -----
 
-    async createSession(): Promise<{ data?: { id: string }; error?: Error }> {
+    async createSession(): Promise<{ data?: { id: string; projectID?: string }; error?: Error }> {
         try {
             const { data } = await this.fetchJson<{ data: V2SessionInfo }>('/api/session', {
                 method: 'POST',
-                body: JSON.stringify({}),
+                body: JSON.stringify({})
             });
-            return { data: data?.data ? { id: data.data.id } : undefined };
+            if (!data?.data) return { data: undefined };
+            // Keep full session info so callers can use projectID for affinity headers
+            return { data: { id: data.data.id, projectID: data.data.projectID } as V2SessionInfo };
         } catch (e) {
             return { error: e as Error };
         }
@@ -174,27 +193,52 @@ export class V2Client {
         promptText: string,
         systemPrompt?: string,
         parts?: unknown[],
-        toolsMap?: Record<string, boolean> | null,
-        model?: { providerID: string; modelID: string }
+        _toolsMap?: Record<string, boolean> | null,
+        _model?: { providerID: string; modelID: string }
     ): Promise<{ data?: Record<string, unknown>; error?: Error }> {
         try {
-            // v2 prompt only accepts "text" for the user message
-            // Model, system, tools, and parts are no longer part of the prompt payload
-            const payload: Record<string, unknown> = { text: promptText };
-            // The model is set at session creation or via the switchModel endpoint.
-            // For now, we pass it through in case the server accepts it.
-            if (model) {
-                payload.model = `${model.providerID}/${model.modelID}`;
+            // v2 API expects { prompt: { text, files, agents } } – see openapi.json
+            // for POST /api/session/{sessionID}/prompt. Older code sent { text }
+            // top-level which now fails with 400 Missing key at ["prompt"].
+            const prompt: Record<string, unknown> = { text: promptText };
+            // Preserve parts/files/agents if the caller supplied them (converted
+            // from PromptPart[] by the streaming layer). The v2 PromptInput
+            // shape is { text, files?, agents? } – unknown keys are ignored.
+            if (Array.isArray(parts) && parts.length > 0) {
+                // Heuristic: split parts into files vs agents vs text – the
+                // proxy's PromptPart is already normalized, so pass through
+                // as files when type is image-like, otherwise ignore.
+                const files: unknown[] = [];
+                const agents: unknown[] = [];
+                for (const p of parts as Array<{
+                    type?: string;
+                    text?: string;
+                    uri?: string;
+                    name?: string;
+                }>) {
+                    if (!p || typeof p !== 'object') continue;
+                    if (p.type === 'image_url' || p.type === 'image' || p.uri) files.push(p);
+                    else if (p.type === 'agent' || p.name) agents.push(p);
+                }
+                if (files.length > 0) prompt.files = files;
+                if (agents.length > 0) prompt.agents = agents;
             }
-            if (systemPrompt) {
-                payload.system = systemPrompt;
+            // System prompt is not a top-level field in v2 PromptInput; when
+            // provided, prepend it to the user text so the model still sees it.
+            // This mirrors the official CLI's behavior of merging system into
+            // the prompt when no dedicated system slot exists.
+            if (systemPrompt && typeof systemPrompt === 'string' && systemPrompt.trim()) {
+                prompt.text = `${systemPrompt.trim()}\n\n${promptText}`;
             }
+            const payload: Record<string, unknown> = { prompt };
+            // Model is set via POST /api/session/:id/model, not in prompt body.
+            // We keep the switchModel() call separate (caller does it before prompt).
 
             const { data } = await this.fetchJson<{ data: Record<string, unknown> }>(
                 `/api/session/${sessionId}/prompt`,
                 {
                     method: 'POST',
-                    body: JSON.stringify(payload),
+                    body: JSON.stringify(payload)
                 }
             );
             return { data: data?.data };
@@ -205,16 +249,15 @@ export class V2Client {
 
     /**
      * Switch the model for a session (v2 API: POST /api/session/:id/model).
+     * The v2 API expects Model.Ref { providerID, id } not a string.
+     * See openapi.json for /api/session/{sessionID}/model.
      */
     async switchModel(sessionId: string, providerID: string, modelID: string): Promise<void> {
-        try {
-            await this.fetchJson(`/api/session/${sessionId}/model`, {
-                method: 'POST',
-                body: JSON.stringify({ model: `${providerID}/${modelID}` }),
-            });
-        } catch {
-            // Best-effort; don't crash the proxy if this fails
-        }
+        if (!sessionId) return;
+        await this.fetchJson(`/api/session/${sessionId}/model`, {
+            method: 'POST',
+            body: JSON.stringify({ model: { providerID, id: modelID } })
+        });
     }
 
     // ----- Provider/model methods -----
@@ -225,11 +268,11 @@ export class V2Client {
     }> {
         const [providerRes, modelRes] = await Promise.all([
             this.fetchJson<{ data: V2ProviderInfo[] }>('/api/provider'),
-            this.fetchJson<{ data: V2ProviderModel[] }>('/api/model'),
+            this.fetchJson<{ data: V2ProviderModel[] }>('/api/model')
         ]);
         return {
             providers: providerRes.data?.data || [],
-            models: modelRes.data?.data || [],
+            models: modelRes.data?.data || []
         };
     }
 
@@ -248,13 +291,15 @@ export class V2Client {
             (m) => m.providerID === providerId && (m.id === modelId || m.modelID === modelId)
         );
         if (!model) {
-            // For opencode provider, default to zen endpoint
+            // For opencode provider, default to zenmux endpoint (the free-tier gateway)
+            // v2.0.5 uses https://zenmux.ai/api/v1 via ZenmuxPlugin; older proxy used
+            // https://opencode.ai/zen/v1 which is no longer the canonical base.
             if (providerId === 'opencode') {
                 return {
-                    baseUrl: process.env.ZEN_BASE_URL || 'https://opencode.ai/zen/v1',
+                    baseUrl: process.env.ZEN_BASE_URL || 'https://zenmux.ai/api/v1',
                     apiKey: null,
                     modelId,
-                    supportsImages: undefined,
+                    supportsImages: undefined
                 };
             }
             return null;
@@ -265,16 +310,14 @@ export class V2Client {
         const modelSettings = model.settings || {};
         const providerSettings = provider?.settings || {};
 
-        const baseUrl = (
-            modelSettings.baseURL ||
-            providerSettings.baseURL ||
+        const baseUrl = (modelSettings.baseURL || providerSettings.baseURL || '').replace(
+            /\/+$/,
             ''
-        ).replace(/\/+$/, '');
+        );
 
         if (!baseUrl && providerId !== 'opencode') return null;
 
-        const effectiveBaseUrl =
-            baseUrl || process.env.ZEN_BASE_URL || 'https://opencode.ai/zen/v1';
+        const effectiveBaseUrl = baseUrl || process.env.ZEN_BASE_URL || 'https://zenmux.ai/api/v1';
 
         // API key resolution: model settings > provider settings > auth store
         let apiKey = modelSettings.apiKey || providerSettings.apiKey || null;
@@ -306,7 +349,8 @@ export function getV2Client(): V2Client {
     if (!_client) {
         // OPENCODE_BACKEND_PASSWORD: password the proxy uses to authenticate with the OpenCode server.
         // Falls back to OPENCODE_SERVER_PASSWORD for backward compat.
-        const serverPassword = process.env.OPENCODE_BACKEND_PASSWORD || process.env.OPENCODE_SERVER_PASSWORD;
+        const serverPassword =
+            process.env.OPENCODE_BACKEND_PASSWORD || process.env.OPENCODE_SERVER_PASSWORD;
         const port = parseInt(
             process.env.TARGET_PORT || process.env.OPENCODE_SERVER_PORT || '4097',
             10

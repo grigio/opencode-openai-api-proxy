@@ -1,6 +1,5 @@
 import type { Request, Response } from 'express';
 import { getClient } from '../client.ts';
-import type { ProviderLike, ProviderModelLike } from '../types.ts';
 import { logger } from '../logger.ts';
 
 async function handleModels(_req: Request, res: Response): Promise<void> {

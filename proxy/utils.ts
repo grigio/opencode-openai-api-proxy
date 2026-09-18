@@ -261,30 +261,31 @@ function deriveToolsFromMessages(messages: ChatMessage[]): ToolDefinition[] | un
     })) as ToolDefinition[];
 }
 
-const MAX_REPEATED_TOOL_LOOPS = (() => {
+function getMaxRepeatedToolLoops(): number {
     const raw =
         process.env.OPENCODE_TOOL_LOOP_LIMIT ??
         process.env.TOOL_LOOP_LIMIT ??
         process.env.MAX_REPEATED_TOOL_LOOPS;
     const n = raw !== undefined ? Number.parseInt(String(raw), 10) : NaN;
     if (Number.isFinite(n) && n >= 0) return n;
-    // Default 15: allows tools like write_stdin that may legitimately be called
-    // several times in a row (e.g. chunked writes / retries) without tripping
-    // the false-positive 422 that previously aborted at 4 identical calls.
     return 15;
-})();
+}
+const MAX_REPEATED_TOOL_LOOPS = getMaxRepeatedToolLoops();
 
 function isToolLoopCheckDisabled(): boolean {
     // DISABLE_TOOL_LOOP_CHECK=1/true disables; TOOL_LOOP_DETECTION=false/0/disabled also disables
-    const disableRaw = process.env.DISABLE_TOOL_LOOP_CHECK ?? process.env.OPENCODE_DISABLE_TOOL_LOOP;
+    const disableRaw =
+        process.env.DISABLE_TOOL_LOOP_CHECK ?? process.env.OPENCODE_DISABLE_TOOL_LOOP;
     if (disableRaw !== undefined) {
         const v = String(disableRaw).toLowerCase().trim();
         if (v === '1' || v === 'true' || v === 'yes' || v === 'on') return true;
     }
-    const detectionRaw = process.env.TOOL_LOOP_DETECTION ?? process.env.OPENCODE_TOOL_LOOP_DETECTION;
+    const detectionRaw =
+        process.env.TOOL_LOOP_DETECTION ?? process.env.OPENCODE_TOOL_LOOP_DETECTION;
     if (detectionRaw !== undefined) {
         const v = String(detectionRaw).toLowerCase().trim();
-        if (v === '0' || v === 'false' || v === 'no' || v === 'off' || v === 'disabled') return true;
+        if (v === '0' || v === 'false' || v === 'no' || v === 'off' || v === 'disabled')
+            return true;
     }
     return false;
 }
@@ -292,6 +293,7 @@ function isToolLoopCheckDisabled(): boolean {
 function findRepeatedToolCallLoop(messages: unknown): { name: string } | null {
     if (isToolLoopCheckDisabled()) return null;
     if (!Array.isArray(messages)) return null;
+    const maxLoops = getMaxRepeatedToolLoops();
     let consecutive = 0;
     let lastSignature: string | null = null;
     for (const m of messages as Array<{
@@ -321,7 +323,7 @@ function findRepeatedToolCallLoop(messages: unknown): { name: string } | null {
             consecutive = 1;
             lastSignature = signature;
         }
-        if (consecutive > MAX_REPEATED_TOOL_LOOPS) {
+        if (consecutive > maxLoops) {
             return { name: lastSignature!.split('(')[0]! };
         }
     }
@@ -414,6 +416,7 @@ export {
     buildResponsesToolMessages,
     deriveToolsFromMessages,
     findRepeatedToolCallLoop,
+    getMaxRepeatedToolLoops,
     MAX_REPEATED_TOOL_LOOPS,
     REFUSAL_PATTERN,
     isRefusal,

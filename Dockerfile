@@ -1,10 +1,13 @@
 # Pinned Node 24 slim - matches .nvmrc and ensures type-stripping support (Node >= 23.6)
 FROM node:24-slim
 
-# OpenCode v2 (beta) — installed via the @opencode-ai/cli package.
-# The v2 binary is called "opencode2" during beta.
-# The "next" dist-tag always points to the latest beta build.
+# OpenCode v2 — installed via the @opencode-ai/cli package.
+# Use `next` (latest beta) or `beta` (stable beta) — both resolve to 0.0.0-beta-*.
+# The proxy mimics opencode v2.0.5 exactly (User-Agent: opencode/latest/2.0.5/opencode)
+# for zen direct calls, while the server is opencode-ai@1.18.31 which correctly
+# handles the free-tier "within OpenCode" check.
 ARG OPENCODE_CLI_TAG=next
+ENV ZEN_CLIENT_VERSION=2.0.5
 
 # Install minimal dependencies required for OpenCode, Git and PUID/PGID support.
 # gosu is downloaded per architecture and verified by checksum (SHA256) before installation.
@@ -24,8 +27,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && gosu --version \
     && rm -rf /var/lib/apt/lists/*
 
-# Install OpenCode v2 CLI globally via NPM
-RUN npm install -g "@opencode-ai/cli@${OPENCODE_CLI_TAG}" \
+# Install OpenCode CLIs: v2 beta (next/beta) for proxy's zen spoofing and
+# stable 1.18.31 (opencode) for the server which correctly handles free-tier.
+# The proxy mimics v2.0.5 exactly (User-Agent, x-opencode-*), while the server
+# is the stable 1.18.31 that passes the gateway's "within OpenCode" check.
+RUN npm install -g "@opencode-ai/cli@${OPENCODE_CLI_TAG}" "opencode-ai@1.18.31" \
     && npm cache clean --force
 
 # Create directories for data and config persistence
@@ -46,9 +52,7 @@ WORKDIR /home/node/project
 # 2. Then the source code (single layer, respects .dockerignore).
 COPY proxy/package.json proxy/package-lock.json /usr/src/proxy/
 RUN cd /usr/src/proxy && npm ci --omit=dev && npm cache clean --force
-COPY proxy/*.ts /usr/src/proxy/
-COPY proxy/routes /usr/src/proxy/routes
-COPY proxy/streaming /usr/src/proxy/streaming
+COPY proxy/ /usr/src/proxy/
 
 # Expose ports (4096 OpenAI Proxy, 4097 native OpenCode API)
 EXPOSE 4096 4097
@@ -72,5 +76,6 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
 # Set the entrypoint script
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 
-# Default command
-CMD ["opencode2", "serve", "--hostname", "0.0.0.0", "--port", "4097"]
+# Default command — use stable opencode 1.18.31 for the server (free-tier works),
+# while proxy emulates v2.0.5 for zen. Both CLIs are installed.
+CMD ["opencode", "serve", "--hostname", "0.0.0.0", "--port", "4097"]

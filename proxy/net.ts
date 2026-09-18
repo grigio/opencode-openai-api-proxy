@@ -112,6 +112,10 @@ function withLoopbackNoProxy(noProxy: string | null): string {
 
 let outboundProxyConfigured = false;
 
+function resetOutboundProxy(): void {
+    outboundProxyConfigured = false;
+}
+
 /**
  * Installs curl-style outbound proxy handling on the built-in fetch when the
  * environment configures one; a no-op otherwise. Safe to call once at boot
@@ -147,4 +151,10 @@ function configureOutboundProxy(env: NodeJS.ProcessEnv = process.env): boolean {
     return true;
 }
 
-export { configureOutboundProxy, resolveProxyEnv, withLoopbackNoProxy, redactProxyUrl };
+export {
+    configureOutboundProxy,
+    resetOutboundProxy,
+    resolveProxyEnv,
+    withLoopbackNoProxy,
+    redactProxyUrl
+};

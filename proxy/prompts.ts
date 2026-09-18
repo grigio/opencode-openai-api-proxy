@@ -8,12 +8,12 @@ interface TextPartInput {
     text: string;
 }
 
-/** A file/image part in a prompt. */
+/** A file/image part in a prompt — matches PromptInput.FileAttachment ({ uri, name }). */
 interface FilePartInput {
     type: 'file';
     mime: string;
     filename?: string;
-    url: string;
+    uri: string;
 }
 
 /** A prompt part sent to the OpenCode server (text or file/image). */
@@ -60,6 +60,7 @@ async function buildPromptPartsAndSystem(
             continue;
         }
 
+        const imageFetches: Array<Promise<{ dataUri: string; role: string } | null>> = [];
         for (const part of m.content) {
             if (part.type === 'text' || part.type === 'input_text' || part.type === 'output_text') {
                 const text = (part as { text?: string }).text || '';
@@ -77,22 +78,31 @@ async function buildPromptPartsAndSystem(
                     continue;
                 }
 
-                try {
-                    const dataUri = await getImageDataUri(url);
-                    const mime = dataUri.split(';')[0]!.split(':')[1]!;
-                    allParts.push({
-                        type: 'file',
-                        mime,
-                        url: dataUri,
-                        filename: 'image'
-                    });
-                    fullPromptText += `${role}: [Image attached]\n\n`;
-                } catch (e) {
-                    logger.warn(
-                        'Skipping image due to error:',
-                        (e as { message?: string }).message
-                    );
-                }
+                imageFetches.push(
+                    getImageDataUri(url)
+                        .then((dataUri) => ({ dataUri, role }))
+                        .catch((e) => {
+                            logger.warn(
+                                'Skipping image due to error:',
+                                (e as { message?: string }).message
+                            );
+                            return null;
+                        })
+                );
+            }
+        }
+        if (imageFetches.length > 0) {
+            const results = await Promise.all(imageFetches);
+            for (const r of results) {
+                if (!r) continue;
+                const mime = r.dataUri.split(';')[0]!.split(':')[1]!;
+                allParts.push({
+                    type: 'file',
+                    mime,
+                    uri: r.dataUri,
+                    filename: 'image'
+                });
+                fullPromptText += `${r.role}: [Image attached]\n\n`;
             }
         }
     }

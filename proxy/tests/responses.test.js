@@ -5,7 +5,9 @@ import { jest } from '@jest/globals';
 jest.unstable_mockModule('../v2-client.ts', () => {
     const client = {
         createSession: jest.fn(async () => ({ data: { id: 'test-session-id' } })),
-        prompt: jest.fn(async () => ({ data: { parts: [{ type: 'text', text: 'Simulated response' }] } })),
+        prompt: jest.fn(async () => ({
+            data: { parts: [{ type: 'text', text: 'Simulated response' }] }
+        })),
         switchModel: jest.fn(async () => {}),
         getProviderGatewayInfo: jest.fn(async () => ({
             baseUrl: 'https://opencode.ai/zen/v1',
@@ -14,8 +16,23 @@ jest.unstable_mockModule('../v2-client.ts', () => {
             supportsImages: undefined
         })),
         getProvidersAndModels: jest.fn(async () => ({
-            providers: [{ id: 'opencode', settings: { apiKey: 'public', baseURL: 'https://opencode.ai/zen/v1' } }],
-            models: [{ id: 'big-pickle', modelID: 'big-pickle', providerID: 'opencode', name: 'Big Pickle', family: 'big-pickle', package: '@opencode/ai/providers/openai', settings: { apiKey: 'public', baseURL: 'https://opencode.ai/zen/v1' } }]
+            providers: [
+                {
+                    id: 'opencode',
+                    settings: { apiKey: 'public', baseURL: 'https://opencode.ai/zen/v1' }
+                }
+            ],
+            models: [
+                {
+                    id: 'big-pickle',
+                    modelID: 'big-pickle',
+                    providerID: 'opencode',
+                    name: 'Big Pickle',
+                    family: 'big-pickle',
+                    package: '@opencode/ai/providers/openai',
+                    settings: { apiKey: 'public', baseURL: 'https://opencode.ai/zen/v1' }
+                }
+            ]
         })),
         subscribeEvents: jest.fn(async () => {
             const sid = 'test-session-id';
@@ -24,7 +41,7 @@ jest.unstable_mockModule('../v2-client.ts', () => {
                 { type: 'session.step.ended', data: { sessionID: sid, finish: 'stop' } }
             ];
             const encoder = new TextEncoder();
-            const sseData = events.map(e => `data: ${JSON.stringify(e)}`).join('\n\n') + '\n\n';
+            const sseData = events.map((e) => `data: ${JSON.stringify(e)}`).join('\n\n') + '\n\n';
             return new ReadableStream({
                 start(controller) {
                     controller.enqueue(encoder.encode(sseData));
@@ -32,9 +49,12 @@ jest.unstable_mockModule('../v2-client.ts', () => {
                 }
             });
         }),
-        'authHeader': ''
+        authHeader: ''
     };
-    return { getV2Client: jest.fn(() => client), clientAbortSignal: jest.fn(() => new AbortController().signal) };
+    return {
+        getV2Client: jest.fn(() => client),
+        clientAbortSignal: jest.fn(() => new AbortController().signal)
+    };
 });
 
 const { default: app } = await import('../app.ts');
@@ -84,7 +104,16 @@ describe('Responses API (modular)', () => {
                     {
                         index: 0,
                         finish_reason: 'tool_calls',
-                        message: { role: 'assistant', tool_calls: [{ id: 'c1', type: 'function', function: { name: 'get_weather', arguments: '{"city":"Rome"}' } }] }
+                        message: {
+                            role: 'assistant',
+                            tool_calls: [
+                                {
+                                    id: 'c1',
+                                    type: 'function',
+                                    function: { name: 'get_weather', arguments: '{"city":"Rome"}' }
+                                }
+                            ]
+                        }
                     }
                 ],
                 usage: {}
@@ -93,7 +122,11 @@ describe('Responses API (modular)', () => {
         const res = await request(app)
             .post('/v1/responses')
             .set('Authorization', 'Bearer test-password')
-            .send({ model: 'opencode/big-pickle', input: 'Weather?', tools: [{ type: 'function', function: { name: 'get_weather' } }] });
+            .send({
+                model: 'opencode/big-pickle',
+                input: 'Weather?',
+                tools: [{ type: 'function', function: { name: 'get_weather' } }]
+            });
         expect(res.statusCode).toEqual(200);
         expect(res.body.output[0].type).toEqual('function_call');
     });

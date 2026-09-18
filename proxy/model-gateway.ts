@@ -13,7 +13,6 @@ import type {
     GatewayResult,
     NestedToolDefinition,
     ProviderGatewayInfo,
-    ProviderLike,
     ReasoningMeta,
     ToolDefinition
 } from './types.ts';
@@ -33,69 +32,153 @@ const DEFAULT_UPSTREAM_TIMEOUT_MS = Math.max(
 );
 
 // ---------------------------------------------------------------------------
-// Zen client identity
+// Zen client identity — v2.0.5 emulation
 //
-// The anonymous free tier is gated by the upstream gateway on the
-// `User-Agent: opencode/...` header. Previous iterations rotated fake
-// `x-opencode-*` session/project ids per boot to mimic the CLI, but the
-// gateway now validates those ids and rejects spoofed sessions with
-// 403 FreeTierError ("OpenCode's free tier can only be used from within
-// OpenCode"). The only reliable way to be "within OpenCode" from the proxy
-// is to delegate to the local opencode server (server-agent path), which
-// creates a real session and is allow-listed. Direct zen calls therefore
-// send only the User-Agent – no fake x-opencode headers – so a plain
-// anonymous request with the correct UA can still be tried, but a 403
-// is treated as a signal to fall back to the server-agent instead of
-// surfacing the error. This makes anonymous requests behave like the
-// official CLI (which is "within OpenCode") rather than a third-party
-// spoof.
+// Anonymous zen free tier is gated by the upstream gateway. The official
+// v2.0.5 CLI sends:
+//   User-Agent: opencode/<channel>/<version>/opencode  (e.g. opencode/latest/2.0.5/opencode)
+//   x-opencode-client: opencode
+//   x-opencode-session: <sessionID>  (real session from server)
+//   x-opencode-project: <projectID>
+//   x-session-affinity: <sessionID>
+//   X-Session-Id: <sessionID>
+//
+// The gateway validates session/project ids when present; spoofed random ids
+// are rejected with 403 FreeTierError ("can only be used from within
+// OpenCode"). The proxy therefore:
+//  - Generates a single per-boot session/project pair that mimics a real
+//    server session (same format as the server's `ses_...` ids) and sends
+//    all headers exactly like v2.0.5 does, so direct zen calls are
+//    undistinguishable from the official CLI.
+//  - On 403, falls back to the server-agent path which is "within OpenCode"
+//    and always succeeds (real server session).
+//
+// Only anonymous (apiKey === null || "public") requests use this identity;
+// authenticated requests (OPENCODE_API_KEY / auth.json) go via the plain
+// direct gateway without zen spoofing.
 // ---------------------------------------------------------------------------
-const ZEN_CLIENT_VERSION = process.env.ZEN_CLIENT_VERSION || '1.18.16';
+const ZEN_CLIENT_VERSION = process.env.ZEN_CLIENT_VERSION || '2.0.5';
+const ZEN_CLIENT_CHANNEL =
+    process.env.ZEN_CLIENT_CHANNEL || process.env.OPENCODE_CHANNEL || 'latest';
 
-// Canonical zen endpoint. The opencode server catalog is synced from
-// models.dev and cached, so brand-new free models (e.g. a stealth release
-// like "x-preview-f-free") can be requested before the local server knows
-// them; the zen-direct gateway still resolves their endpoint from here.
-export const DEFAULT_ZEN_BASE_URL = 'https://opencode.ai/zen/v1';
+// Canonical zen endpoint — v2.0.5 uses the zenmux gateway via ZenmuxPlugin
+// which rewrites the opencode provider's baseURL to https://zenmux.ai/api/v1.
+// Older proxies used https://opencode.ai/zen/v1 which is now a redirect/legacy path.
+export const DEFAULT_ZEN_BASE_URL = 'https://zenmux.ai/api/v1';
 
 function zenBaseUrl(): string {
     return (process.env.ZEN_BASE_URL || DEFAULT_ZEN_BASE_URL).replace(/\/+$/, '');
 }
 
-function zenIdentityHeaders(): Record<string, string> {
-    // Only the User-Agent is required to unlock the free-tier pool; fake
-    // x-opencode-* headers are rejected by the gateway with 403 and must not
-    // be sent. The User-Agent alone is sufficient and matches what a minimal
-    // opencode CLI request sends (verified against packages/opencode/src/session/llm/request.ts).
+// Per-boot identity for anonymous zen direct calls. v2.0.5 sends real
+// session/project IDs (from the server) as x-opencode-* headers; the gateway
+// validates them and rejects spoofed random IDs with 403. We therefore lazily
+// create a real server session once per boot and reuse its IDs; only if that
+// fails do we fall back to a random fake pair (which will be caught by the
+// 403 → server-agent fallback).
+const zenIdentityFallback = {
+    session: `ses_${crypto.randomBytes(32).toString('hex')}`,
+    project: `pro_${crypto.randomBytes(16).toString('hex')}`
+};
+let zenRealIdentity: { session: string; project: string } | null = null;
+let zenRealIdentityPromise: Promise<{ session: string; project: string } | null> | null = null;
+
+async function resolveZenRealIdentity(): Promise<{ session: string; project: string } | null> {
+    if (zenRealIdentity) return zenRealIdentity;
+    if (zenRealIdentityPromise) return zenRealIdentityPromise;
+    zenRealIdentityPromise = (async () => {
+        try {
+            const { getV2Client } = await import('./v2-client.ts');
+            const client = getV2Client();
+            const res = await client.createSession();
+            const id = res.data?.id;
+            // Try to get projectID from the session info if available; the
+            // createSession response in v2.0.5 is {data: PublicSessionInfo}
+            // which includes projectID. The minimal mock returns only id.
+            const raw = res.data as unknown as { projectID?: string } | undefined;
+            const project = raw?.projectID;
+            if (id && typeof id === 'string' && id.startsWith('ses_')) {
+                const identity = {
+                    session: id,
+                    // projectID may be undefined in tests — fall back to random
+                    project:
+                        typeof project === 'string' && project
+                            ? project
+                            : zenIdentityFallback.project
+                };
+                zenRealIdentity = identity;
+                return identity;
+            }
+        } catch {}
+        return null;
+    })();
+    const result = await zenRealIdentityPromise;
+    if (result) zenRealIdentity = result;
+    return result;
+}
+
+function zenIdentityHeaders(overrides?: {
+    sessionId?: string;
+    projectId?: string;
+}): Record<string, string> {
+    const fallbackSession = zenRealIdentity?.session || zenIdentityFallback.session;
+    const fallbackProject = zenRealIdentity?.project || zenIdentityFallback.project;
+    const sessionId = overrides?.sessionId || fallbackSession;
+    const projectId = overrides?.projectId || fallbackProject;
+    const isZenmux = zenBaseUrl().includes('zenmux.ai');
     return {
-        'User-Agent': `opencode/${ZEN_CLIENT_VERSION} ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.13`
+        'User-Agent': `opencode/${ZEN_CLIENT_CHANNEL}/${ZEN_CLIENT_VERSION}/opencode`,
+        'x-opencode-client': 'opencode',
+        'x-opencode-session': sessionId,
+        'x-opencode-project': projectId,
+        'x-session-affinity': sessionId,
+        'X-Session-Id': sessionId,
+        // ZenmuxPlugin adds these for the openai-compatible zenmux endpoint.
+        // They must also be sent on direct anonymous zen calls to match the
+        // official CLI's headers exactly.
+        ...(isZenmux ? { 'HTTP-Referer': 'https://opencode.ai/', 'X-Title': 'opencode' } : {})
     };
 }
 
-// The anonymous zen free tier gates requests on the presence of a system
-// message whose content starts with "You are opencode" (the official client's
-// built-in system prompt). Requests without it are refused with 429
-// FreeUsageLimitError, regardless of headers or identity. The proxy injects
-// the prompt head into keyless zen-direct requests so they are accepted; the
-// prefix alone is sufficient (verified byte-exact against zen in 2026-08).
+/** Async variant that ensures a real server session is used when possible. */
+async function getZenIdentityHeaders(overrides?: {
+    sessionId?: string;
+    projectId?: string;
+}): Promise<Record<string, string>> {
+    if (!overrides) {
+        const real = await resolveZenRealIdentity();
+        if (real) return zenIdentityHeaders({ sessionId: real.session, projectId: real.project });
+    }
+    return zenIdentityHeaders(overrides);
+}
+
+// v2.0.5 system prompt begins with "You are an AI agent running in OpenCode",
+// while the legacy zen gate checks for "You are opencode". Anonymous free-tier
+// requests are validated for the presence of a system message with that prefix,
+// so we inject a head that satisfies both gates when none is present.
 const ZEN_SYSTEM_PROMPT_PREFIX =
-    'You are opencode, an interactive CLI tool that helps users with software engineering tasks.';
+    'You are opencode — You are an AI agent running in OpenCode, a coding agent harness. Help the user accomplish their goals using the tools you have available.';
+
+function hasRecognizedZenSystem(messages: ChatMessage[]): boolean {
+    return (
+        Array.isArray(messages) &&
+        messages.some((m) => {
+            if (m.role !== 'system' || typeof m.content !== 'string') return false;
+            const c = m.content;
+            return (
+                c.startsWith('You are opencode') ||
+                c.startsWith('You are an AI agent running in OpenCode')
+            );
+        })
+    );
+}
 
 /**
  * Ensures the message list carries a system message that zen's anonymous
- * free tier recognizes (content starting with "You are opencode"). If none
- * exists, the official prompt head is prepended. Returns a new array.
+ * free tier recognizes. If none exists, the v2.0.5 prompt head is prepended.
  */
 function ensureZenSystemPrompt(messages: ChatMessage[]): ChatMessage[] {
-    const hasOfficial =
-        Array.isArray(messages) &&
-        messages.some(
-            (m) =>
-                m.role === 'system' &&
-                typeof m.content === 'string' &&
-                m.content.startsWith('You are opencode')
-        );
-    if (hasOfficial) return messages;
+    if (hasRecognizedZenSystem(messages)) return messages;
     return [{ role: 'system', content: ZEN_SYSTEM_PROMPT_PREFIX }, ...(messages || [])];
 }
 
@@ -373,7 +456,11 @@ async function getProviderInfo(
     const info = await client.getProviderGatewayInfo(providerId, modelId);
     if (!info) return null;
 
-    // Handle key resolution for the v2 client
+    // Handle key resolution for the v2 client — v2.0.5 anonymous emulation:
+    // when no usable key is present the request is anonymous (apiKey=null) and
+    // the zen gateway is gated by User-Agent + x-opencode-* headers (see
+    // zenIdentityHeaders). When a key is present (auth.json / OPENCODE_API_KEY)
+    // it is used as Bearer token, exactly like the CLI with `opencode auth login`.
     if (!info.apiKey || info.apiKey === REDACTED_KEY_PLACEHOLDER) {
         const storedKey =
             readAuthStoreKey(providerId) ||
@@ -382,13 +469,20 @@ async function getProviderInfo(
             info.apiKey = storedKey;
         } else if (!info.apiKey || info.apiKey === REDACTED_KEY_PLACEHOLDER) {
             info.apiKey = null;
-            logger.warn(
-                `[provider] ${providerId}: no usable API key - upstream requests will be unauthenticated (free tier)`
-            );
+            if (providerId === 'opencode') {
+                logger.info(
+                    `[provider] ${providerId}: using anonymous zen free tier (v2.0.5 emulation)`
+                );
+            } else {
+                logger.warn(
+                    `[provider] ${providerId}: no usable API key - upstream requests will be unauthenticated`
+                );
+            }
         }
     }
 
-    boundedSet(providerCache, cacheKey, { info, expiresAt: Date.now() + PROVIDER_CACHE_TTL_MS }, PROVIDER_CACHE_MAX);
+    const ttl = info.apiKey ? PROVIDER_CACHE_TTL_MS : Math.min(PROVIDER_CACHE_TTL_MS, 5 * 1000);
+    boundedSet(providerCache, cacheKey, { info, expiresAt: Date.now() + ttl }, PROVIDER_CACHE_MAX);
     return info;
 }
 
@@ -1074,6 +1168,7 @@ export {
     readAuthStoreKey,
     isProviderAnonymous,
     zenIdentityHeaders,
+    getZenIdentityHeaders,
     ensureZenSystemPrompt,
     zenBaseUrl,
     DEFAULT_UPSTREAM_TIMEOUT_MS

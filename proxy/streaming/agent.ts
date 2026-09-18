@@ -2,7 +2,7 @@ import crypto from 'crypto';
 import type { Response } from 'express';
 import { consumeV2StreamEvents, sendResponseSseEvent } from '../sse.ts';
 import { DEFAULT_UPSTREAM_TIMEOUT_MS } from '../model-gateway.ts';
-import { isRefusal, SERVER_AGENT_TOOLS } from '../utils.ts';
+import { SERVER_AGENT_TOOLS } from '../utils.ts';
 import type { PromptPart } from '../prompts.ts';
 import { storeResponseState } from '../state.ts';
 import { buildResponsesUsage } from '../utils.ts';
@@ -59,7 +59,7 @@ async function runAgentPromptWithRetry({
     data: AgentPromptResultData | null;
     lastUsedError: Error | null;
 }> {
-    let data: AgentPromptResultData | null = null;
+    const data: AgentPromptResultData | null = null;
     let lastError: Error | null = null;
 
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
@@ -121,29 +121,69 @@ async function runAgentPromptWithRetry({
                                 const evt = JSON.parse(payload);
                                 if (evt.data?.sessionID !== attemptSessionId) continue;
 
-                                if (evt.type === 'session.text.delta') {
-                                    textContent += (evt.data.delta as string) || '';
-                                } else if (evt.type === 'session.reasoning.ended') {
+                                if (
+                                    evt.type === 'session.text.delta' ||
+                                    evt.type === 'session.next.text.delta' ||
+                                    evt.type === 'session.reasoning.delta' ||
+                                    evt.type === 'session.next.reasoning.delta'
+                                ) {
+                                    const delta =
+                                        (evt.data.delta as string) ||
+                                        (evt.data.text as string) ||
+                                        '';
+                                    const isReasoning =
+                                        evt.type.includes('reasoning') ||
+                                        (evt.data.reasoning as boolean) === true;
+                                    if (isReasoning) reasoningContent += delta;
+                                    else textContent += delta;
+                                } else if (
+                                    evt.type === 'session.reasoning.ended' ||
+                                    evt.type === 'session.next.reasoning.ended'
+                                ) {
                                     reasoningContent += (evt.data.text as string) || '';
-                                } else if (evt.type === 'session.step.ended') {
+                                } else if (
+                                    evt.type === 'session.step.ended' ||
+                                    evt.type === 'session.next.step.ended'
+                                ) {
+                                    // session.next.text.ended is per-text, not terminal; ignore
+                                    if (evt.type === 'session.next.text.ended') continue;
+                                    const finish = (evt.data.finish as string) || 'stop';
+                                    if (finish !== 'stop' && finish !== 'end' && finish !== 'error')
+                                        continue;
                                     reader.cancel().catch(() => {});
                                     // Build the result from collected text
                                     const resultParts: Array<{ type: string; text: string }> = [];
                                     if (reasoningContent) {
-                                        resultParts.push({ type: 'reasoning', text: reasoningContent });
+                                        resultParts.push({
+                                            type: 'reasoning',
+                                            text: reasoningContent
+                                        });
                                     }
                                     if (textContent) {
                                         resultParts.push({ type: 'text', text: textContent });
                                     }
-                                    return { data: { parts: resultParts } as AgentPromptResultData, lastUsedError: null };
+                                    return {
+                                        data: { parts: resultParts } as AgentPromptResultData,
+                                        lastUsedError: null
+                                    };
+                                } else if (evt.type === 'session.next.text.ended') {
+                                    // Per-text block end, not terminal — ignore
+                                    continue;
                                 } else if (evt.type === 'session.error') {
                                     reader.cancel().catch(() => {});
-                                    const errorData = evt.data?.error as Record<string, unknown> | undefined;
-                                    const msg = (errorData?.data as Record<string, unknown>)?.message as string || 'Session error';
+                                    const errorData = evt.data?.error as
+                                        Record<string, unknown> | undefined;
+                                    const msg =
+                                        ((errorData?.data as Record<string, unknown>)
+                                            ?.message as string) || 'Session error';
                                     throw new Error(msg);
                                 }
                             } catch (parseErr) {
-                                if (parseErr instanceof Error && parseErr.message === 'Session error') throw parseErr;
+                                if (
+                                    parseErr instanceof Error &&
+                                    parseErr.message === 'Session error'
+                                )
+                                    throw parseErr;
                                 // ignore JSON parse errors
                             }
                         }
@@ -301,34 +341,6 @@ async function streamAgentChatCompletion({
         attemptErrorMsg = null;
         const state = { ended: false, streamedAnything: false, insideReasoning: false };
 
-        // Send the prompt (async in v2)
-        client.prompt(sessionId, fullPromptText.trim(), systemPrompt.trim(), allParts, toolsMap, {
-            providerID: providerId,
-            modelID: modelId
-        }).then((r) => {
-            if (r.error) {
-                promptError = r.error;
-                logger.warn('Prompt error:', r.error.message);
-            }
-        }).catch((err) => {
-            promptError = err;
-            logger.warn('Prompt error:', err.message);
-        });
-
-        // Subscribe to global event stream
-        const eventStream = await client.subscribeEvents();
-        if (!eventStream) {
-            attemptErrorMsg = 'Failed to subscribe to event stream';
-            if (attempt >= 3) {
-                writeErrorChunk(attemptErrorMsg);
-            }
-            continue;
-        }
-
-        const keepaliveInterval = setInterval(() => {
-            if (!res.destroyed) res.write(': keepalive\n\n');
-        }, 15000);
-
         const writeChatDelta = (content: string) => {
             res.write(
                 `data: ${JSON.stringify({
@@ -363,6 +375,37 @@ async function streamAgentChatCompletion({
             res.write('data: [DONE]\n\n');
             res.end();
         };
+
+        // Send the prompt (async in v2)
+        client
+            .prompt(sessionId, fullPromptText.trim(), systemPrompt.trim(), allParts, toolsMap, {
+                providerID: providerId,
+                modelID: modelId
+            })
+            .then((r) => {
+                if (r.error) {
+                    promptError = r.error;
+                    logger.warn('Prompt error:', r.error.message);
+                }
+            })
+            .catch((err) => {
+                promptError = err;
+                logger.warn('Prompt error:', err.message);
+            });
+
+        // Subscribe to global event stream
+        const eventStream = await client.subscribeEvents();
+        if (!eventStream) {
+            attemptErrorMsg = 'Failed to subscribe to event stream';
+            if (attempt >= 3) {
+                writeErrorChunk(attemptErrorMsg);
+            }
+            continue;
+        }
+
+        const keepaliveInterval = setInterval(() => {
+            if (!res.destroyed) res.write(': keepalive\n\n');
+        }, 15000);
 
         const finalize = (finishReason: string) => {
             if (state.ended) return;
@@ -667,18 +710,31 @@ async function streamAgentResponses({
         await client.switchModel(sessionId, providerId, modelId);
 
         // Send the prompt (async in v2)
-        client.prompt(sessionId, fullPromptText, systemPrompt, allParts, toolsMap, {
-            providerID: providerId,
-            modelID: modelId
-        }).then((r) => {
-            if (r.error) {
-                promptError = r.error;
-                logger.warn('Prompt error:', r.error.message);
-            }
-        }).catch((err) => {
-            promptError = err;
-            logger.warn('Prompt error:', err.message);
-        });
+        client
+            .prompt(sessionId, fullPromptText, systemPrompt, allParts, toolsMap, {
+                providerID: providerId,
+                modelID: modelId
+            })
+            .then((r) => {
+                if (r.error) {
+                    promptError = r.error;
+                    logger.warn('Prompt error:', r.error.message);
+                }
+            })
+            .catch((err) => {
+                promptError = err;
+                logger.warn('Prompt error:', err.message);
+            });
+
+        const writeErrorEvent = (msg: string) => {
+            if (res.destroyed) return;
+            sendResponseSseEvent(res, {
+                type: 'error',
+                error: { message: msg || 'stream ended without completion' }
+            });
+            res.write('data: [DONE]\n\n');
+            res.end();
+        };
 
         // Subscribe to global event stream
         const eventStream = await client.subscribeEvents();
@@ -691,16 +747,6 @@ async function streamAgentResponses({
         const keepaliveInterval = setInterval(() => {
             if (!res.destroyed) res.write(': keepalive\n\n');
         }, 15000);
-
-        const writeErrorEvent = (msg: string) => {
-            if (res.destroyed) return;
-            sendResponseSseEvent(res, {
-                type: 'error',
-                error: { message: msg || 'stream ended without completion' }
-            });
-            res.write('data: [DONE]\n\n');
-            res.end();
-        };
 
         const finalize = (status: string) => {
             if (state.ended) return;

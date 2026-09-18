@@ -21,8 +21,23 @@ jest.unstable_mockModule('../v2-client.ts', () => {
             supportsImages: undefined
         })),
         getProvidersAndModels: jest.fn(async () => ({
-            providers: [{ id: 'opencode', settings: { apiKey: 'public', baseURL: 'https://opencode.ai/zen/v1' } }],
-            models: [{ id: 'big-pickle', modelID: 'big-pickle', providerID: 'opencode', name: 'Big Pickle', family: 'big-pickle', package: '@opencode/ai/providers/openai', settings: { apiKey: 'public', baseURL: 'https://opencode.ai/zen/v1' } }]
+            providers: [
+                {
+                    id: 'opencode',
+                    settings: { apiKey: 'public', baseURL: 'https://opencode.ai/zen/v1' }
+                }
+            ],
+            models: [
+                {
+                    id: 'big-pickle',
+                    modelID: 'big-pickle',
+                    providerID: 'opencode',
+                    name: 'Big Pickle',
+                    family: 'big-pickle',
+                    package: '@opencode/ai/providers/openai',
+                    settings: { apiKey: 'public', baseURL: 'https://opencode.ai/zen/v1' }
+                }
+            ]
         })),
         subscribeEvents: jest.fn(async () => {
             const sessionId = 'test-session-id';
@@ -32,7 +47,8 @@ jest.unstable_mockModule('../v2-client.ts', () => {
                 { type: 'session.step.ended', data: { sessionID: sessionId, finish: 'stop' } }
             ];
             const encoder = new TextEncoder();
-            const sseData = mockEvents.map(e => `data: ${JSON.stringify(e)}`).join('\n\n') + '\n\n';
+            const sseData =
+                mockEvents.map((e) => `data: ${JSON.stringify(e)}`).join('\n\n') + '\n\n';
             return new ReadableStream({
                 start(controller) {
                     controller.enqueue(encoder.encode(sseData));
@@ -40,9 +56,12 @@ jest.unstable_mockModule('../v2-client.ts', () => {
                 }
             });
         }),
-        'authHeader': ''
+        authHeader: ''
     };
-    return { getV2Client: jest.fn(() => client), clientAbortSignal: jest.fn(() => new AbortController().signal) };
+    return {
+        getV2Client: jest.fn(() => client),
+        clientAbortSignal: jest.fn(() => new AbortController().signal)
+    };
 });
 
 const { default: app } = await import('../app.ts');
@@ -251,15 +270,21 @@ describe('Proxy OpenAI API', () => {
             const sessionId = 'test-session-id';
             const events = [
                 { type: 'session.reasoning.started', data: { sessionID: sessionId } },
-                { type: 'session.reasoning.ended', data: { sessionID: sessionId, text: 'Thinking...' } },
+                {
+                    type: 'session.reasoning.ended',
+                    data: { sessionID: sessionId, text: 'Thinking...' }
+                },
                 { type: 'session.text.delta', data: { sessionID: sessionId, delta: 'Simulated' } },
                 { type: 'session.text.delta', data: { sessionID: sessionId, delta: ' response' } },
                 { type: 'session.step.ended', data: { sessionID: sessionId, finish: 'stop' } }
             ];
             const encoder = new TextEncoder();
-            const sseData = events.map(e => `data: ${JSON.stringify(e)}`).join('\n\n') + '\n\n';
+            const sseData = events.map((e) => `data: ${JSON.stringify(e)}`).join('\n\n') + '\n\n';
             return new ReadableStream({
-                start(controller) { controller.enqueue(encoder.encode(sseData)); controller.close(); }
+                start(controller) {
+                    controller.enqueue(encoder.encode(sseData));
+                    controller.close();
+                }
             });
         });
 
@@ -283,9 +308,9 @@ describe('Proxy OpenAI API', () => {
         global.fetch.mockResolvedValue({
             ok: true,
             status: 200,
-            headers: { get: (h: string) => (h.toLowerCase() === 'content-type' ? 'image/png' : null) },
+            headers: { get: (h) => (h.toLowerCase() === 'content-type' ? 'image/png' : null) },
             arrayBuffer: async () => new TextEncoder().encode('fake-image-data').buffer
-        } as unknown as Response);
+        });
 
         const res = await request(app)
             .post('/v1/chat/completions')
@@ -373,13 +398,19 @@ describe('Proxy OpenAI API', () => {
         client.subscribeEvents.mockImplementationOnce(async () => {
             const events = [
                 { type: 'session.reasoning.started', data: { sessionID: sessionId } },
-                { type: 'session.reasoning.ended', data: { sessionID: sessionId, text: 'The user is asking a simple math question. The answer is 2.' } },
+                {
+                    type: 'session.reasoning.ended',
+                    data: {
+                        sessionID: sessionId,
+                        text: 'The user is asking a simple math question. The answer is 2.'
+                    }
+                },
                 { type: 'session.text.delta', data: { sessionID: sessionId, delta: '1+1' } },
                 { type: 'session.text.delta', data: { sessionID: sessionId, delta: ' = 2' } },
                 { type: 'session.step.ended', data: { sessionID: sessionId, finish: 'stop' } }
             ];
             const encoder = new TextEncoder();
-            const sseData = events.map(e => `data: ${JSON.stringify(e)}`).join('\n\n') + '\n\n';
+            const sseData = events.map((e) => `data: ${JSON.stringify(e)}`).join('\n\n') + '\n\n';
             return new ReadableStream({
                 start(controller) {
                     controller.enqueue(encoder.encode(sseData));
@@ -412,13 +443,16 @@ describe('Proxy OpenAI API', () => {
         client.subscribeEvents.mockImplementationOnce(async () => {
             const events = [
                 { type: 'session.reasoning.started', data: { sessionID: sessionId } },
-                { type: 'session.reasoning.ended', data: { sessionID: sessionId, text: 'Thinking...' } },
+                {
+                    type: 'session.reasoning.ended',
+                    data: { sessionID: sessionId, text: 'Thinking...' }
+                },
                 { type: 'session.text.delta', data: { sessionID: sessionId, delta: 'Banana' } },
                 { type: 'session.text.delta', data: { sessionID: sessionId, delta: '!' } },
                 { type: 'session.step.ended', data: { sessionID: sessionId, finish: 'stop' } }
             ];
             const encoder = new TextEncoder();
-            const sseData = events.map(e => `data: ${JSON.stringify(e)}`).join('\n\n') + '\n\n';
+            const sseData = events.map((e) => `data: ${JSON.stringify(e)}`).join('\n\n') + '\n\n';
             return new ReadableStream({
                 start(controller) {
                     controller.enqueue(encoder.encode(sseData));
@@ -452,13 +486,16 @@ describe('Proxy OpenAI API', () => {
             const sessionId = 'test-session-id';
             const events = [
                 { type: 'session.reasoning.started', data: { sessionID: sessionId } },
-                { type: 'session.reasoning.ended', data: { sessionID: sessionId, text: 'Thinking process...' } },
+                {
+                    type: 'session.reasoning.ended',
+                    data: { sessionID: sessionId, text: 'Thinking process...' }
+                },
                 { type: 'session.text.delta', data: { sessionID: sessionId, delta: 'Simulated' } },
                 { type: 'session.text.delta', data: { sessionID: sessionId, delta: ' response' } },
                 { type: 'session.step.ended', data: { sessionID: sessionId, finish: 'stop' } }
             ];
             const encoder = new TextEncoder();
-            const sseData = events.map(e => `data: ${JSON.stringify(e)}`).join('\n\n') + '\n\n';
+            const sseData = events.map((e) => `data: ${JSON.stringify(e)}`).join('\n\n') + '\n\n';
             return new ReadableStream({
                 start(controller) {
                     controller.enqueue(encoder.encode(sseData));
@@ -524,13 +561,16 @@ describe('Proxy OpenAI API', () => {
         client.subscribeEvents.mockImplementationOnce(async () => {
             const events = [
                 { type: 'session.reasoning.started', data: { sessionID: sessionId } },
-                { type: 'session.reasoning.ended', data: { sessionID: sessionId, text: 'Thinking...' } },
+                {
+                    type: 'session.reasoning.ended',
+                    data: { sessionID: sessionId, text: 'Thinking...' }
+                },
                 { type: 'session.text.delta', data: { sessionID: sessionId, delta: 'Banana' } },
                 { type: 'session.text.delta', data: { sessionID: sessionId, delta: '!' } },
                 { type: 'session.step.ended', data: { sessionID: sessionId, finish: 'stop' } }
             ];
             const encoder = new TextEncoder();
-            const sseData = events.map(e => `data: ${JSON.stringify(e)}`).join('\n\n') + '\n\n';
+            const sseData = events.map((e) => `data: ${JSON.stringify(e)}`).join('\n\n') + '\n\n';
             return new ReadableStream({
                 start(controller) {
                     controller.enqueue(encoder.encode(sseData));
@@ -831,7 +871,8 @@ describe('Proxy OpenAI API', () => {
         const messages = [{ role: 'user', content: 'weather?' }];
         for (let i = 0; i < MAX_REPEATED_TOOL_LOOPS + 1; i++) {
             messages.push(assistant());
-            if (i < MAX_REPEATED_TOOL_LOOPS) messages.push({ role: 'tool', tool_call_id: `c${i}`, content: 'x' });
+            if (i < MAX_REPEATED_TOOL_LOOPS)
+                messages.push({ role: 'tool', tool_call_id: `c${i}`, content: 'x' });
         }
 
         const res = await request(app)
@@ -1846,7 +1887,17 @@ describe('Proxy OpenAI API', () => {
             // An oauth-backed provider is reported with no apiKey at all:
             client.getProvidersAndModels.mockResolvedValueOnce({
                 providers: [{ id: 'opencode', settings: {} }],
-                models: [{ id: 'big-pickle', modelID: 'big-pickle', providerID: 'opencode', name: 'Big Pickle', family: 'big-pickle', package: '@opencode/ai/providers/openai', settings: { baseURL: 'https://opencode.ai/zen/v1' } }]
+                models: [
+                    {
+                        id: 'big-pickle',
+                        modelID: 'big-pickle',
+                        providerID: 'opencode',
+                        name: 'Big Pickle',
+                        family: 'big-pickle',
+                        package: '@opencode/ai/providers/openai',
+                        settings: { baseURL: 'https://opencode.ai/zen/v1' }
+                    }
+                ]
             });
 
             global.fetch.mockResolvedValue(
@@ -2048,13 +2099,13 @@ describe('Proxy OpenAI API', () => {
             // NOT the opencode server agent via session.prompt.
             expect(global.fetch.mock.calls.length).toEqual(1);
             expect(global.fetch.mock.calls[0][0]).toContain(
-                'https://opencode.ai/zen/v1/chat/completions'
+                'https://zenmux.ai/api/v1/chat/completions'
             );
             const reqHeaders = global.fetch.mock.calls[0][1].headers;
             expect(reqHeaders['User-Agent']).toMatch(/^opencode\//);
-            // The fake x-opencode session headers are no longer sent – the
-            // gateway now rejects spoofed sessions with 403 FreeTierError, so
-            // only the User-Agent is used for the anonymous pool.
+            // v2.0.5 sends real session/project headers (like the CLI) plus
+            // HTTP-Referer/X-Title for zenmux. The gateway validates them and
+            // rejects spoofed random IDs, so we now use a real server session.
 
             // Zen's anonymous pool requires the "You are opencode" system head.
             const body = JSON.parse(global.fetch.mock.calls[0][1].body);
@@ -2064,7 +2115,8 @@ describe('Proxy OpenAI API', () => {
             // The server agent must NOT have been invoked (it would execute the
             // tool inside the container on the proxy side).
             expect(client.prompt).not.toHaveBeenCalled();
-            expect(client.createSession).not.toHaveBeenCalled();
+            // createSession may be called lazily to obtain real affinity headers
+            // for v2.0.5 (the mock returns test-session-id), but no prompt is sent.
         } finally {
             process.env.OPENCODE_TOOL_CALLING = originalMode || 'direct';
         }
@@ -2166,7 +2218,7 @@ describe('Proxy OpenAI API', () => {
             // Streamed from zen directly with the official CLI User-Agent.
             expect(global.fetch.mock.calls.length).toEqual(1);
             expect(global.fetch.mock.calls[0][0]).toContain(
-                'https://opencode.ai/zen/v1/chat/completions'
+                'https://zenmux.ai/api/v1/chat/completions'
             );
             const reqHeaders = global.fetch.mock.calls[0][1].headers;
             expect(reqHeaders['User-Agent']).toMatch(/^opencode\//);
@@ -2218,8 +2270,23 @@ describe('Proxy OpenAI API', () => {
         process.env.OPENCODE_TOOL_CALLING = 'auto';
         const client = getV2Client();
         client.getProvidersAndModels.mockResolvedValueOnce({
-            providers: [{ id: 'opencode', settings: { apiKey: 'public', baseURL: 'https://opencode.ai/zen/v1' } }],
-            models: [{ id: 'big-pickle', modelID: 'big-pickle', providerID: 'opencode', name: 'Big Pickle', family: 'big-pickle', package: '@opencode/ai/providers/openai', settings: { apiKey: 'public', baseURL: 'https://opencode.ai/zen/v1' } }]
+            providers: [
+                {
+                    id: 'opencode',
+                    settings: { apiKey: 'public', baseURL: 'https://opencode.ai/zen/v1' }
+                }
+            ],
+            models: [
+                {
+                    id: 'big-pickle',
+                    modelID: 'big-pickle',
+                    providerID: 'opencode',
+                    name: 'Big Pickle',
+                    family: 'big-pickle',
+                    package: '@opencode/ai/providers/openai',
+                    settings: { apiKey: 'public', baseURL: 'https://opencode.ai/zen/v1' }
+                }
+            ]
         });
         global.fetch.mockResolvedValueOnce(
             nonStreamingFetchResponse({
@@ -2250,7 +2317,7 @@ describe('Proxy OpenAI API', () => {
             expect(res.statusCode).toEqual(200);
             expect(res.body.model).toEqual('opencode/x-preview-f-free');
             expect(global.fetch.mock.calls[0][0]).toContain(
-                'https://opencode.ai/zen/v1/chat/completions'
+                'https://zenmux.ai/api/v1/chat/completions'
             );
             const upstreamBody = JSON.parse(global.fetch.mock.calls[0][1].body);
             expect(upstreamBody.model).toEqual('x-preview-f-free');
@@ -2357,7 +2424,20 @@ describe('Proxy OpenAI API', () => {
         });
         client.getProvidersAndModels.mockResolvedValueOnce({
             providers: [{ id: 'opencode', settings: {} }],
-            models: [{ id: 'big-pickle', modelID: 'big-pickle', providerID: 'opencode', name: 'Big Pickle', family: 'big-pickle', package: '@opencode/ai/providers/openai', settings: { baseURL: 'https://opencode.ai/zen/v1', capabilities: { attachment: false } } }]
+            models: [
+                {
+                    id: 'big-pickle',
+                    modelID: 'big-pickle',
+                    providerID: 'opencode',
+                    name: 'Big Pickle',
+                    family: 'big-pickle',
+                    package: '@opencode/ai/providers/openai',
+                    settings: {
+                        baseURL: 'https://opencode.ai/zen/v1',
+                        capabilities: { attachment: false }
+                    }
+                }
+            ]
         });
         global.fetch.mockResolvedValueOnce(
             nonStreamingFetchResponse({
@@ -2491,9 +2571,12 @@ describe('Proxy OpenAI API', () => {
                 { type: 'session.step.ended', data: { sessionID: sessionId, finish: 'stop' } }
             ];
             const encoder = new TextEncoder();
-            const sseData = events.map(e => `data: ${JSON.stringify(e)}`).join('\n\n') + '\n\n';
+            const sseData = events.map((e) => `data: ${JSON.stringify(e)}`).join('\n\n') + '\n\n';
             return new ReadableStream({
-                start(controller) { controller.enqueue(encoder.encode(sseData)); controller.close(); }
+                start(controller) {
+                    controller.enqueue(encoder.encode(sseData));
+                    controller.close();
+                }
             });
         });
 
@@ -2530,14 +2613,20 @@ describe('Proxy OpenAI API', () => {
         client.subscribeEvents.mockImplementationOnce(async () => {
             const sessionId = 'test-session-id';
             const events = [
-                { type: 'session.text.delta', data: { sessionID: sessionId, delta: 'partial answer' } },
+                {
+                    type: 'session.text.delta',
+                    data: { sessionID: sessionId, delta: 'partial answer' }
+                },
                 { type: 'session.text.delta', data: { sessionID: sessionId, delta: ' continued' } },
                 { type: 'session.step.ended', data: { sessionID: sessionId, finish: 'stop' } }
             ];
             const encoder = new TextEncoder();
-            const sseData = events.map(e => `data: ${JSON.stringify(e)}`).join('\n\n') + '\n\n';
+            const sseData = events.map((e) => `data: ${JSON.stringify(e)}`).join('\n\n') + '\n\n';
             return new ReadableStream({
-                start(controller) { controller.enqueue(encoder.encode(sseData)); controller.close(); }
+                start(controller) {
+                    controller.enqueue(encoder.encode(sseData));
+                    controller.close();
+                }
             });
         });
 
@@ -2705,8 +2794,27 @@ describe('Proxy OpenAI API', () => {
             supportsImages: false
         });
         client.getProvidersAndModels.mockResolvedValueOnce({
-            providers: [{ id: 'opencode', settings: { apiKey: 'public', baseURL: 'https://opencode.ai/zen/v1' } }],
-            models: [{ id: 'big-pickle', modelID: 'big-pickle', providerID: 'opencode', name: 'Big Pickle', family: 'big-pickle', package: '@opencode/ai/providers/openai', settings: { apiKey: 'public', baseURL: 'https://opencode.ai/zen/v1', capabilities: { attachment: false } } }]
+            providers: [
+                {
+                    id: 'opencode',
+                    settings: { apiKey: 'public', baseURL: 'https://opencode.ai/zen/v1' }
+                }
+            ],
+            models: [
+                {
+                    id: 'big-pickle',
+                    modelID: 'big-pickle',
+                    providerID: 'opencode',
+                    name: 'Big Pickle',
+                    family: 'big-pickle',
+                    package: '@opencode/ai/providers/openai',
+                    settings: {
+                        apiKey: 'public',
+                        baseURL: 'https://opencode.ai/zen/v1',
+                        capabilities: { attachment: false }
+                    }
+                }
+            ]
         });
         global.fetch.mockResolvedValue(
             nonStreamingFetchResponse({
@@ -2913,7 +3021,17 @@ describe('Proxy OpenAI API', () => {
         client.getProviderGatewayInfo.mockResolvedValueOnce(null);
         client.getProvidersAndModels.mockResolvedValueOnce({
             providers: [{ id: 'acme', settings: {} }],
-            models: [{ id: 'some-model', modelID: 'some-model', providerID: 'acme', name: 'Some Model', family: 'some-model', package: '', settings: {} }]
+            models: [
+                {
+                    id: 'some-model',
+                    modelID: 'some-model',
+                    providerID: 'acme',
+                    name: 'Some Model',
+                    family: 'some-model',
+                    package: '',
+                    settings: {}
+                }
+            ]
         });
 
         const res = await request(app)
@@ -2950,13 +3068,19 @@ describe('Proxy OpenAI API', () => {
         client.subscribeEvents.mockImplementationOnce(async () => {
             const events = [
                 { type: 'session.text.delta', data: { sessionID: sessionId, delta: 'Let me ' } },
-                { type: 'session.text.delta', data: { sessionID: sessionId, delta: 'check the weather' } },
-                { type: 'session.step.ended', data: { sessionID: sessionId, finish: 'tool-calls' } },
+                {
+                    type: 'session.text.delta',
+                    data: { sessionID: sessionId, delta: 'check the weather' }
+                },
+                {
+                    type: 'session.step.ended',
+                    data: { sessionID: sessionId, finish: 'tool-calls' }
+                },
                 { type: 'session.text.delta', data: { sessionID: sessionId, delta: '.' } },
                 { type: 'session.step.ended', data: { sessionID: sessionId, finish: 'stop' } }
             ];
             const encoder = new TextEncoder();
-            const sseData = events.map(e => `data: ${JSON.stringify(e)}`).join('\n\n') + '\n\n';
+            const sseData = events.map((e) => `data: ${JSON.stringify(e)}`).join('\n\n') + '\n\n';
             return new ReadableStream({
                 start(controller) {
                     controller.enqueue(encoder.encode(sseData));
@@ -2989,12 +3113,15 @@ describe('Proxy OpenAI API', () => {
         client.subscribeEvents.mockImplementationOnce(async () => {
             const events = [
                 { type: 'session.text.delta', data: { sessionID: sessionId, delta: 'Calling' } },
-                { type: 'session.step.ended', data: { sessionID: sessionId, finish: 'tool-calls' } },
+                {
+                    type: 'session.step.ended',
+                    data: { sessionID: sessionId, finish: 'tool-calls' }
+                },
                 { type: 'session.text.delta', data: { sessionID: sessionId, delta: ' tool' } },
                 { type: 'session.step.ended', data: { sessionID: sessionId, finish: 'stop' } }
             ];
             const encoder = new TextEncoder();
-            const sseData = events.map(e => `data: ${JSON.stringify(e)}`).join('\n\n') + '\n\n';
+            const sseData = events.map((e) => `data: ${JSON.stringify(e)}`).join('\n\n') + '\n\n';
             return new ReadableStream({
                 start(controller) {
                     controller.enqueue(encoder.encode(sseData));
@@ -3030,13 +3157,16 @@ describe('Proxy OpenAI API', () => {
         client.subscribeEvents.mockImplementationOnce(async () => {
             const events = [
                 { type: 'session.reasoning.started', data: { sessionID: sessionId } },
-                { type: 'session.reasoning.ended', data: { sessionID: sessionId, text: 'Thinking' } },
+                {
+                    type: 'session.reasoning.ended',
+                    data: { sessionID: sessionId, text: 'Thinking' }
+                },
                 { type: 'session.text.delta', data: { sessionID: sessionId, delta: 'Answer' } },
                 { type: 'session.text.delta', data: { sessionID: sessionId, delta: '!' } },
                 { type: 'session.step.ended', data: { sessionID: sessionId, finish: 'stop' } }
             ];
             const encoder = new TextEncoder();
-            const sseData = events.map(e => `data: ${JSON.stringify(e)}`).join('\n\n') + '\n\n';
+            const sseData = events.map((e) => `data: ${JSON.stringify(e)}`).join('\n\n') + '\n\n';
             return new ReadableStream({
                 start(controller) {
                     controller.enqueue(encoder.encode(sseData));
@@ -3069,13 +3199,16 @@ describe('Proxy OpenAI API', () => {
         client.subscribeEvents.mockImplementationOnce(async () => {
             const events = [
                 { type: 'session.reasoning.started', data: { sessionID: sessionId } },
-                { type: 'session.reasoning.ended', data: { sessionID: sessionId, text: 'Thinking' } },
+                {
+                    type: 'session.reasoning.ended',
+                    data: { sessionID: sessionId, text: 'Thinking' }
+                },
                 { type: 'session.text.delta', data: { sessionID: sessionId, delta: 'Answer' } },
                 { type: 'session.text.delta', data: { sessionID: sessionId, delta: '!' } },
                 { type: 'session.step.ended', data: { sessionID: sessionId, finish: 'stop' } }
             ];
             const encoder = new TextEncoder();
-            const sseData = events.map(e => `data: ${JSON.stringify(e)}`).join('\n\n') + '\n\n';
+            const sseData = events.map((e) => `data: ${JSON.stringify(e)}`).join('\n\n') + '\n\n';
             return new ReadableStream({
                 start(controller) {
                     controller.enqueue(encoder.encode(sseData));
@@ -3308,8 +3441,23 @@ describe('Proxy OpenAI API', () => {
             supportsImages: false
         });
         client.getProvidersAndModels.mockResolvedValueOnce({
-            providers: [{ id: 'opencodebackend', settings: { apiKey: 'public', baseURL: 'https://backend.example/v1' } }],
-            models: [{ id: 'deepseek-v4-flash-free', modelID: 'deepseek-v4-flash-free', providerID: 'opencodebackend', name: 'Deepseek V4 Flash Free', family: 'deepseek-v4-flash-free', package: '@opencode/ai/providers/openai', settings: { apiKey: 'public', baseURL: 'https://backend.example/v1' } }]
+            providers: [
+                {
+                    id: 'opencodebackend',
+                    settings: { apiKey: 'public', baseURL: 'https://backend.example/v1' }
+                }
+            ],
+            models: [
+                {
+                    id: 'deepseek-v4-flash-free',
+                    modelID: 'deepseek-v4-flash-free',
+                    providerID: 'opencodebackend',
+                    name: 'Deepseek V4 Flash Free',
+                    family: 'deepseek-v4-flash-free',
+                    package: '@opencode/ai/providers/openai',
+                    settings: { apiKey: 'public', baseURL: 'https://backend.example/v1' }
+                }
+            ]
         });
         global.fetch.mockResolvedValue(
             nonStreamingFetchResponse({
@@ -4732,15 +4880,21 @@ describe('Proxy OpenAI API', () => {
             const sessionId = 'test-session-id';
             const events = [
                 { type: 'session.reasoning.started', data: { sessionID: sessionId } },
-                { type: 'session.reasoning.ended', data: { sessionID: sessionId, text: 'Thinking process...' } },
+                {
+                    type: 'session.reasoning.ended',
+                    data: { sessionID: sessionId, text: 'Thinking process...' }
+                },
                 { type: 'session.text.delta', data: { sessionID: sessionId, delta: 'Simulated' } },
                 { type: 'session.text.delta', data: { sessionID: sessionId, delta: ' response' } },
                 { type: 'session.step.ended', data: { sessionID: sessionId, finish: 'stop' } }
             ];
             const encoder = new TextEncoder();
-            const sseData = events.map(e => `data: ${JSON.stringify(e)}`).join('\n\n') + '\n\n';
+            const sseData = events.map((e) => `data: ${JSON.stringify(e)}`).join('\n\n') + '\n\n';
             return new ReadableStream({
-                start(controller) { controller.enqueue(encoder.encode(sseData)); controller.close(); }
+                start(controller) {
+                    controller.enqueue(encoder.encode(sseData));
+                    controller.close();
+                }
             });
         });
         const res = await request(app)
@@ -4768,15 +4922,21 @@ describe('Proxy OpenAI API', () => {
             const sessionId = 'test-session-id';
             const events = [
                 { type: 'session.reasoning.started', data: { sessionID: sessionId } },
-                { type: 'session.reasoning.ended', data: { sessionID: sessionId, text: 'Thinking...' } },
+                {
+                    type: 'session.reasoning.ended',
+                    data: { sessionID: sessionId, text: 'Thinking...' }
+                },
                 { type: 'session.text.delta', data: { sessionID: sessionId, delta: 'Simulated' } },
                 { type: 'session.text.delta', data: { sessionID: sessionId, delta: ' response' } },
                 { type: 'session.step.ended', data: { sessionID: sessionId, finish: 'stop' } }
             ];
             const encoder = new TextEncoder();
-            const sseData = events.map(e => `data: ${JSON.stringify(e)}`).join('\n\n') + '\n\n';
+            const sseData = events.map((e) => `data: ${JSON.stringify(e)}`).join('\n\n') + '\n\n';
             return new ReadableStream({
-                start(controller) { controller.enqueue(encoder.encode(sseData)); controller.close(); }
+                start(controller) {
+                    controller.enqueue(encoder.encode(sseData));
+                    controller.close();
+                }
             });
         });
         const res = await request(app)

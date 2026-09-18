@@ -30,9 +30,23 @@ async function getImageDataUri(url: string): Promise<string> {
         const timeout = setTimeout(() => controller.abort(), IMAGE_FETCH_TIMEOUT_MS);
         let response: Response;
         try {
-            response = await fetch(url, { signal: controller.signal });
+            response = await fetch(url, { signal: controller.signal, redirect: 'manual' });
         } finally {
             clearTimeout(timeout);
+        }
+        if (response.status >= 300 && response.status < 400) {
+            const location = response.headers.get('location');
+            let target: string | null = null;
+            try {
+                target = location ? new URL(location, url).toString() : null;
+            } catch {}
+            if (target) {
+                const safeTarget = resolveSafeImageUrl(target);
+                if (!safeTarget) throw new Error(`Refusing redirect to unsafe URL: ${location}`);
+            }
+            throw new Error(
+                `Refusing redirect to ${location || 'unknown'} (HTTP ${response.status})`
+            );
         }
         if (!response.ok) {
             throw new Error(`HTTP ${response.status}`);
