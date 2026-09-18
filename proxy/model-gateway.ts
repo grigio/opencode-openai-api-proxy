@@ -2,7 +2,7 @@ import crypto from 'crypto';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import type { OpencodeClient } from '@opencode-ai/sdk';
+import type { V2Client } from './v2-client.ts';
 import { logger } from './logger.ts';
 import type {
     ChatCompletionData,
@@ -357,7 +357,7 @@ function readAuthStoreKey(providerId: string): string | null {
  *   be determined for the model.
  */
 async function getProviderInfo(
-    client: OpencodeClient,
+    client: V2Client,
     providerId: string,
     modelId: string
 ): Promise<ProviderGatewayInfo | null> {
@@ -367,72 +367,24 @@ async function getProviderInfo(
         return cached.info;
     }
 
-    const providersRes = await client.config.providers();
-    const providersRaw = (providersRes.data?.providers || []) as
-        ProviderLike[] | Record<string, ProviderLike>;
-    const providersList = Array.isArray(providersRaw)
-        ? providersRaw
-        : Object.entries(providersRaw).map(([id, info]) => ({ ...info, id }));
+    const info = await client.getProviderGatewayInfo(providerId, modelId);
+    if (!info) return null;
 
-    const provider = providersList.find((p) => p.id === providerId);
-    if (!provider) return null;
-
-    const model = provider.models?.[modelId];
-    const api = model?.api || {};
-
-    const options = (provider.options || {}) as Record<string, string | undefined>;
-    let baseUrl = (api.url || options.url || options.baseURL || '').replace(/\/+$/, '');
-    // The opencode server's provider catalog is a cached snapshot (models.dev
-    // sync), so models released after the server image was built/started are
-    // missing from it - the lookup above yields no baseUrl and would fail every
-    // request for that model even though zen itself serves it. The zen endpoint
-    // is stable, so default to it for the "opencode" provider; authenticated
-    // keys still apply there and anonymous requests keep working unchanged.
-    let catalogMiss = false;
-    if (!baseUrl && providerId === 'opencode') {
-        catalogMiss = true;
-        baseUrl = zenBaseUrl();
-        logger.warn(
-            `[provider] opencode/${modelId}: not found in the OpenCode server catalog (stale snapshot?) - falling back to the zen endpoint ${baseUrl}`
-        );
-    }
-    if (!baseUrl && !catalogMiss) return null;
-
-    // Keys configured directly (opencode.json options.apiKey / env) are
-    // exposed as-is. Stored keys (auth.json) and the OPENCODE_API_KEY env are
-    // never exposed by the server: providers without a usable key are reported
-    // with the "public" placeholder (or no apiKey when the auth store holds an
-    // entry), so fall back to the local auth store and the zen env var.
-    let apiKey = provider.key || options.apiKey || null;
-    if (!apiKey || apiKey === REDACTED_KEY_PLACEHOLDER) {
+    // Handle key resolution for the v2 client
+    if (!info.apiKey || info.apiKey === REDACTED_KEY_PLACEHOLDER) {
         const storedKey =
             readAuthStoreKey(providerId) ||
             (providerId === 'opencode' ? process.env.OPENCODE_API_KEY : null);
         if (storedKey) {
-            apiKey = storedKey;
-        } else if (apiKey === REDACTED_KEY_PLACEHOLDER) {
+            info.apiKey = storedKey;
+        } else if (!info.apiKey || info.apiKey === REDACTED_KEY_PLACEHOLDER) {
+            info.apiKey = null;
             logger.warn(
-                `[provider] ${providerId}: no usable API key - the opencode server reports only the "public" placeholder and none was found in the local auth store or ${providerId === 'opencode' ? 'OPENCODE_API_KEY' : 'env'}; upstream requests will be unauthenticated (free tier)`
+                `[provider] ${providerId}: no usable API key - upstream requests will be unauthenticated (free tier)`
             );
         }
     }
 
-    const info: ProviderGatewayInfo = {
-        baseUrl,
-        apiKey,
-        modelId: api.id || modelId,
-        // Whether the model declares support for image/attachment inputs:
-        // true, false, or undefined when the provider config is silent.
-        // undefined means unknown, so callers should keep images and only
-        // strip them if the upstream actually rejects them. Newer servers
-        // nest the flag under `capabilities`; older ones expose it at the
-        // top level (or under options).
-        supportsImages: catalogMiss
-            ? undefined
-            : (model?.attachment ??
-              (model?.capabilities as { attachment?: boolean } | undefined)?.attachment ??
-              (model?.options as { attachment?: boolean } | undefined)?.attachment)
-    };
     boundedSet(providerCache, cacheKey, { info, expiresAt: Date.now() + PROVIDER_CACHE_TTL_MS }, PROVIDER_CACHE_MAX);
     return info;
 }

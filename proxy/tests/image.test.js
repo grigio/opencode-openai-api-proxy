@@ -2,34 +2,25 @@ process.env.OPENCODE_TOOL_CALLING = 'direct';
 import request from 'supertest';
 import { jest } from '@jest/globals';
 
-jest.unstable_mockModule('@opencode-ai/sdk', () => {
+jest.unstable_mockModule('../v2-client.ts', () => {
     const client = {
-        config: {
-            providers: jest.fn(async () => ({
-                data: {
-                    providers: [
-                        {
-                            id: 'opencode',
-                            options: { apiKey: 'public' },
-                            models: {
-                                'big-pickle': {
-                                    id: 'big-pickle',
-                                    api: { id: 'big-pickle', url: 'https://opencode.ai/zen/v1' }
-                                }
-                            }
-                        }
-                    ]
-                }
-            })),
-            update: jest.fn(async () => ({}))
-        },
-        session: {
-            create: jest.fn(async () => ({ data: { id: 'test-session-id' } })),
-            prompt: jest.fn(async () => ({ data: { parts: [{ type: 'text', text: 'Simulated response' }] } }))
-        },
-        event: { subscribe: jest.fn(async () => ({ stream: (async function* () {})() })) }
+        createSession: jest.fn(async () => ({ data: { id: 'test-session-id' } })),
+        prompt: jest.fn(async () => ({ data: { parts: [{ type: 'text', text: 'Simulated response' }] } })),
+        switchModel: jest.fn(async () => {}),
+        getProviderGatewayInfo: jest.fn(async () => ({
+            baseUrl: 'https://opencode.ai/zen/v1',
+            apiKey: null,
+            modelId: 'big-pickle',
+            supportsImages: undefined
+        })),
+        getProvidersAndModels: jest.fn(async () => ({
+            providers: [{ id: 'opencode', settings: { apiKey: 'public', baseURL: 'https://opencode.ai/zen/v1' } }],
+            models: [{ id: 'big-pickle', modelID: 'big-pickle', providerID: 'opencode', name: 'Big Pickle', family: 'big-pickle', package: '@opencode/ai/providers/openai', settings: { apiKey: 'public', baseURL: 'https://opencode.ai/zen/v1' } }]
+        })),
+        subscribeEvents: jest.fn(async () => new ReadableStream({ start(c) { c.close(); } })),
+        'authHeader': ''
     };
-    return { createOpencodeClient: jest.fn(() => client) };
+    return { getV2Client: jest.fn(() => client), clientAbortSignal: jest.fn(() => new AbortController().signal) };
 });
 
 const { default: app } = await import('../app.ts');

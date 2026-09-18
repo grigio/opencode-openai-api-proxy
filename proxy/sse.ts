@@ -156,6 +156,155 @@ async function consumeUpstreamSSE({
  * @param {() => void} options.onReasoningEnd
  * @param {(delta: string) => void} options.onTextDelta
  */
+// ---------------------------------------------------------------------------
+// V2 event stream consumer
+// ---------------------------------------------------------------------------
+
+interface V2ConsumeStreamEventsOptions {
+    upstream: ReadableStream<Uint8Array>;
+    sessionId: string;
+    res: Response;
+    state: StreamState;
+    getPromptError: () => Error | null;
+    onFinish: (finish: string) => void;
+    onFail: (msg: string) => void;
+    onReasoningStart: () => void;
+    onReasoningDelta: (delta: string) => void;
+    onReasoningEnd: () => void;
+    onTextDelta: (delta: string) => void;
+}
+
+/**
+ * Consumes the OpenCode v2 SSE event stream, which uses different event types
+ * than the v1 SDK stream:
+ *
+ * - `session.text.delta` for streaming text deltas
+ * - `session.reasoning.ended` for reasoning (complete block)
+ * - `session.step.ended` with `finish` for completion
+ * - `session.error` for errors
+ * - `session.usage.updated` for token counts
+ */
+async function consumeV2StreamEvents({
+    upstream,
+    sessionId,
+    res,
+    state,
+    getPromptError,
+    onFinish,
+    onFail,
+    onReasoningStart,
+    onReasoningDelta,
+    onReasoningEnd,
+    onTextDelta
+}: V2ConsumeStreamEventsOptions): Promise<void> {
+    const reader = upstream.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    try {
+        while (!state.ended && !res.destroyed) {
+            let chunk;
+            try {
+                ({ value: chunk } = await reader.read());
+            } catch {
+                break;
+            }
+            if (!chunk) break;
+
+            buffer += decoder.decode(chunk, { stream: true });
+            let separator;
+            while ((separator = buffer.indexOf('\n\n')) !== -1) {
+                const raw = buffer.slice(0, separator);
+                buffer = buffer.slice(separator + 2);
+
+                for (const line of raw.split('\n')) {
+                    if (!line.startsWith('data:')) continue;
+                    const payload = line.slice(5).trim();
+                    if (!payload || payload === '[DONE]') continue;
+
+                    let evt;
+                    try {
+                        evt = JSON.parse(payload);
+                    } catch {
+                        continue;
+                    }
+
+                    const evtType = evt.type as string;
+                    const evtData = (evt.data || {}) as Record<string, unknown>;
+
+                    // Filter events for this session
+                    if (evtData.sessionID && evtData.sessionID !== sessionId) continue;
+
+                    // Handle v2 event types
+                    if (evtType === 'session.text.delta') {
+                        const delta = evtData.delta as string;
+                        if (delta) {
+                            if (state.insideReasoning) {
+                                onReasoningEnd();
+                                state.insideReasoning = false;
+                            }
+                            onTextDelta(delta);
+                            state.streamedAnything = true;
+                        }
+                    } else if (evtType === 'session.reasoning.started') {
+                        if (!state.insideReasoning) {
+                            onReasoningStart();
+                            state.insideReasoning = true;
+                        }
+                    } else if (evtType === 'session.reasoning.ended') {
+                        const text = evtData.text as string;
+                        if (state.insideReasoning && text) {
+                            onReasoningDelta(text);
+                            onReasoningEnd();
+                            state.insideReasoning = false;
+                        } else if (state.insideReasoning) {
+                            onReasoningEnd();
+                            state.insideReasoning = false;
+                        }
+                    } else if (evtType === 'session.step.ended') {
+                        const finish = (evtData.finish as string) || 'stop';
+                        // Only end the stream on terminal finish reasons.
+                        // 'tool-calls' is intermediate — the agent will continue.
+                        if (finish === 'stop' || finish === 'end' || finish === 'error') {
+                            onFinish(finish);
+                            return;
+                        }
+                        // For non-terminal finishes (e.g. 'tool-calls'), continue reading
+                    } else if (evtType === 'session.error') {
+                        const errorData = evtData.error as Record<string, unknown> | undefined;
+                        const msg =
+                            (errorData?.data as Record<string, unknown>)?.message as string ||
+                            (errorData?.message as string) ||
+                            'Session error';
+                        onFail(msg);
+                        return;
+                    }
+                }
+            }
+
+            // Check for prompt errors periodically
+            const promptError = getPromptError();
+            if (promptError) {
+                onFail(promptError.message);
+                return;
+            }
+        }
+    } catch (streamError) {
+        logger.error('V2 streaming error:', streamError);
+        onFail((streamError as Error).message);
+    } finally {
+        try {
+            reader.cancel();
+        } catch {
+            // ignore
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Legacy event stream consumer (for backward compatibility)
+// ---------------------------------------------------------------------------
+
 async function consumeStreamEvents({
     eventIterator,
     sessionId,
@@ -308,5 +457,5 @@ async function consumeStreamEvents({
     }
 }
 
-export { sendResponseSseEvent, consumeUpstreamSSE, consumeStreamEvents };
+export { sendResponseSseEvent, consumeUpstreamSSE, consumeStreamEvents, consumeV2StreamEvents };
 export type { UpstreamSSEOptions, ConsumeStreamEventsOptions };

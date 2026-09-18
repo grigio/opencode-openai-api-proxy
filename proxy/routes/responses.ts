@@ -1,6 +1,6 @@
 import crypto from 'crypto';
 import type { Request, Response } from 'express';
-import type { OpencodeClient, Config } from '@opencode-ai/sdk';
+import type { V2Client } from '../v2-client.ts';
 import {
     getProviderInfo,
     callChatCompletionsWithImageFallback,
@@ -54,7 +54,7 @@ function agentResponsesMessages(input: unknown, instructions: unknown): ChatMess
 async function handleToolsResponses(
     req: Request,
     res: Response,
-    client: OpencodeClient,
+    client: V2Client,
     providerId: string,
     modelId: string,
     body: ResponsesBody,
@@ -414,11 +414,7 @@ async function responsesHandler(req: Request, res: Response): Promise<Response |
                             : deriveToolsFromMessages(messages);
                     const systemWithTools = buildAgentToolsSystem(systemPrompt, agentTools);
                     try {
-                        await client.config.update({
-                            body: {
-                                activeModel: { providerID: providerId, modelID: modelId }
-                            } as unknown as Config
-                        });
+                        await client.switchModel('', providerId, modelId);
                     } catch (caughtConf) {
                         logger.warn(
                             'Failed to set active model:',
@@ -427,7 +423,7 @@ async function responsesHandler(req: Request, res: Response): Promise<Response |
                     }
                     let agentSessionId = previousState?.sessionId;
                     if (!agentSessionId) {
-                        const sessionRes = await client.session.create();
+                        const sessionRes = await client.createSession();
                         agentSessionId = sessionRes.data?.id;
                         if (!agentSessionId) throw new Error('Failed to create session');
                     }
@@ -521,11 +517,7 @@ async function responsesHandler(req: Request, res: Response): Promise<Response |
         }
 
         try {
-            await client.config.update({
-                body: {
-                    activeModel: { providerID: providerId, modelID: modelId }
-                } as unknown as Config
-            });
+            await client.switchModel('', providerId, modelId);
         } catch (caughtConf) {
             logger.warn(
                 'Failed to set active model:',
@@ -558,7 +550,7 @@ async function responsesHandler(req: Request, res: Response): Promise<Response |
 
         let sessionId = previousState?.sessionId;
         if (!sessionId) {
-            const sessionRes = await client.session.create();
+            const sessionRes = await client.createSession();
             sessionId = sessionRes.data?.id;
             if (!sessionId) throw new Error('Failed to create session');
         }

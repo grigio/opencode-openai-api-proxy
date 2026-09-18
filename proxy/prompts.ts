@@ -1,9 +1,22 @@
 import { getImageDataUri } from './image.ts';
-import type { TextPartInput, FilePartInput } from '@opencode-ai/sdk';
 import type { ChatMessage, ModelRef } from './types.ts';
 import { logger } from './logger.ts';
 
-/** A prompt part sent to the OpenCode SDK (text or file/image). */
+/** A text part in a prompt. */
+interface TextPartInput {
+    type: 'text';
+    text: string;
+}
+
+/** A file/image part in a prompt. */
+interface FilePartInput {
+    type: 'file';
+    mime: string;
+    filename?: string;
+    url: string;
+}
+
+/** A prompt part sent to the OpenCode server (text or file/image). */
 type PromptPart = TextPartInput | FilePartInput;
 
 function parseModel(model: unknown): ModelRef | null {

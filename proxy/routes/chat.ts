@@ -1,6 +1,5 @@
 import type { Request, Response } from 'express';
-import type { OpencodeClient } from '@opencode-ai/sdk';
-import type { Config } from '@opencode-ai/sdk';
+import type { V2Client } from '../v2-client.ts';
 import {
     getProviderInfo,
     callChatCompletionsWithImageFallback,
@@ -43,7 +42,7 @@ import { logger } from '../logger.ts';
 async function handleToolsChatCompletions(
     req: Request,
     res: Response,
-    client: OpencodeClient,
+    client: V2Client,
     providerId: string,
     modelId: string,
     body: ChatCompletionBody
@@ -391,11 +390,7 @@ async function chatCompletionsHandler(req: Request, res: Response): Promise<Resp
                         tools as import('../types.ts').ToolDefinition[] | undefined
                     );
                     try {
-                        await client.config.update({
-                            body: {
-                                activeModel: { providerID: providerId, modelID: modelId }
-                            } as unknown as Config
-                        });
+                        await client.switchModel('', providerId, modelId);
                     } catch (caughtConf) {
                         logger.warn(
                             'Failed to set active model:',
@@ -499,11 +494,7 @@ async function chatCompletionsHandler(req: Request, res: Response): Promise<Resp
         );
 
         try {
-            await client.config.update({
-                body: {
-                    activeModel: { providerID: providerId, modelID: modelId }
-                } as unknown as Config
-            });
+            await client.switchModel('', providerId, modelId);
         } catch (caughtConf) {
             logger.warn(
                 'Failed to set active model:',
@@ -512,7 +503,9 @@ async function chatCompletionsHandler(req: Request, res: Response): Promise<Resp
         }
 
         const textProviderInfo = await getProviderInfo(client, providerId, modelId);
-        if (shouldUseZenDirect(textProviderInfo, providerId)) {
+        // For streaming, always use server-agent (event stream) — zen-direct
+        // streams can't fall back to server-agent once the response starts.
+        if (!stream && shouldUseZenDirect(textProviderInfo, providerId)) {
             logger.info(
                 `[zen-direct] ${providerId}/${modelId} chat anonymous free tier -> direct zen ${zenBaseUrl()} (rotated CLI identity)`
             );

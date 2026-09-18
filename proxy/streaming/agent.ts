@@ -1,16 +1,16 @@
 import crypto from 'crypto';
 import type { Response } from 'express';
-import type { OpencodeClient, SessionPromptData } from '@opencode-ai/sdk';
-import { consumeStreamEvents, sendResponseSseEvent } from '../sse.ts';
+import { consumeV2StreamEvents, sendResponseSseEvent } from '../sse.ts';
 import { DEFAULT_UPSTREAM_TIMEOUT_MS } from '../model-gateway.ts';
 import { isRefusal, SERVER_AGENT_TOOLS } from '../utils.ts';
 import type { PromptPart } from '../prompts.ts';
 import { storeResponseState } from '../state.ts';
 import { buildResponsesUsage } from '../utils.ts';
 import { logger } from '../logger.ts';
+import type { V2Client } from '../v2-client.ts';
 
 interface RunAgentPromptOptions {
-    client: OpencodeClient;
+    client: V2Client;
     sessionId?: string;
     providerId: string;
     modelId: string;
@@ -37,8 +37,11 @@ interface OutputItemTracker {
 }
 
 /**
- * Runs a non-streaming server-agent prompt with retries for agent-style models
- * that occasionally error, time out, or refuse when no tools are allowed.
+ * Runs a non-streaming server-agent prompt with retries.
+ *
+ * The v2 API prompt is async: we send the prompt, subscribe to the global
+ * event stream, and wait for `session.step.ended` to get the completion.
+ * We then fetch the session messages to get the final response.
  */
 async function runAgentPromptWithRetry({
     client,
@@ -62,96 +65,124 @@ async function runAgentPromptWithRetry({
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
         let attemptSessionId = sessionId;
         if (!attemptSessionId) {
-            const created = await client.session.create();
+            const created = await client.createSession();
             attemptSessionId = created.data?.id;
             if (!attemptSessionId) throw new Error('Failed to create session');
         }
 
-        const attemptPromise = client.session.prompt({
-            path: { id: attemptSessionId },
-            body: {
-                model: { providerID: providerId, modelID: modelId },
-                prompt: prompt.trim(),
-                system: system.trim(),
-                parts,
-                ...(toolsMap === null ? {} : { tools: toolsMap })
-            } as SessionPromptData['body'] & { prompt: string }
-        });
-        let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
-        const timeoutPromise = new Promise((_, reject) => {
-            timeoutHandle = setTimeout(
-                () =>
-                    reject(
-                        new Error(
-                            `Attempt ${attempt} timed out after ${Math.round(timeoutMs / 1000)}s`
-                        )
-                    ),
-                timeoutMs
-            );
-        });
+        // Switch model if needed
+        if (providerId && modelId) {
+            await client.switchModel(attemptSessionId, providerId, modelId);
+        }
 
-        let responseRes: Awaited<ReturnType<typeof client.session.prompt>> | undefined;
+        const promptResult = await client.prompt(
+            attemptSessionId,
+            prompt,
+            system,
+            parts,
+            toolsMap,
+            { providerID: providerId, modelID: modelId }
+        );
+
+        if (promptResult.error) {
+            lastError = promptResult.error;
+            logger.warn(`${label} attempt ${attempt}/${maxAttempts} failed:`, lastError.message);
+            if (attempt >= maxAttempts) break;
+            continue;
+        }
+
+        // In v2, client.prompt() is async — it returns the admitted user message,
+        // not the assistant response. We must consume the event stream to collect
+        // text deltas and wait for session.step.ended.
+        let textContent = '';
+        let reasoningContent = '';
         try {
-            responseRes = (await Promise.race([attemptPromise, timeoutPromise])) as Awaited<
-                ReturnType<typeof client.session.prompt>
-            >;
-        } catch (e) {
-            lastError = e as Error;
-            logger.warn(`${label} attempt ${attempt}/${maxAttempts} failed:`, (e as Error).message);
-            if (attempt >= maxAttempts) break;
-            continue;
-        } finally {
-            if (timeoutHandle) clearTimeout(timeoutHandle);
-        }
+            const upstream = await client.subscribeEvents();
+            if (upstream) {
+                const reader = upstream.getReader();
+                const decoder = new TextDecoder();
+                let buffer = '';
+                const startTime = Date.now();
 
-        if (responseRes?.response?.status >= 400) {
-            lastError = new Error(
-                (responseRes as unknown as { error?: { message?: string } } | null)?.error
-                    ?.message ||
-                    (
-                        responseRes?.response?.body as unknown as {
-                            error?: { message?: string };
-                        } | null
-                    )?.error?.message ||
-                    `OpenCode server returned HTTP ${responseRes.response.status}`
-            );
-            logger.warn(`${label} attempt ${attempt}/${maxAttempts} error:`, lastError.message);
-            if (attempt >= maxAttempts) break;
-            continue;
-        }
+                while (Date.now() - startTime < timeoutMs) {
+                    const { value: chunk, done } = await reader.read();
+                    if (done) break;
+                    buffer += decoder.decode(chunk, { stream: true });
 
-        const attemptParts = responseRes.data?.parts || [];
-        const attemptText = attemptParts
-            .filter((p) => p.type === 'text')
-            .map((p) => p.text)
-            .join('');
-        if (attemptText.trim() && isRefusal(attemptText.slice(0, 150))) {
-            lastError = new Error(
-                'Model refused to answer (no tools allowed in this proxy branch)'
-            );
-            logger.warn(
-                `${label} attempt ${attempt}/${maxAttempts} refused: "${attemptText.slice(0, 60)}"`
-            );
-            if (attempt >= maxAttempts) {
-                data = responseRes.data as unknown as AgentPromptResultData;
+                    let separator;
+                    while ((separator = buffer.indexOf('\n\n')) !== -1) {
+                        const raw = buffer.slice(0, separator);
+                        buffer = buffer.slice(separator + 2);
+                        for (const line of raw.split('\n')) {
+                            if (!line.startsWith('data:')) continue;
+                            const payload = line.slice(5).trim();
+                            if (!payload) continue;
+                            try {
+                                const evt = JSON.parse(payload);
+                                if (evt.data?.sessionID !== attemptSessionId) continue;
+
+                                if (evt.type === 'session.text.delta') {
+                                    textContent += (evt.data.delta as string) || '';
+                                } else if (evt.type === 'session.reasoning.ended') {
+                                    reasoningContent += (evt.data.text as string) || '';
+                                } else if (evt.type === 'session.step.ended') {
+                                    reader.cancel().catch(() => {});
+                                    // Build the result from collected text
+                                    const resultParts: Array<{ type: string; text: string }> = [];
+                                    if (reasoningContent) {
+                                        resultParts.push({ type: 'reasoning', text: reasoningContent });
+                                    }
+                                    if (textContent) {
+                                        resultParts.push({ type: 'text', text: textContent });
+                                    }
+                                    return { data: { parts: resultParts } as AgentPromptResultData, lastUsedError: null };
+                                } else if (evt.type === 'session.error') {
+                                    reader.cancel().catch(() => {});
+                                    const errorData = evt.data?.error as Record<string, unknown> | undefined;
+                                    const msg = (errorData?.data as Record<string, unknown>)?.message as string || 'Session error';
+                                    throw new Error(msg);
+                                }
+                            } catch (parseErr) {
+                                if (parseErr instanceof Error && parseErr.message === 'Session error') throw parseErr;
+                                // ignore JSON parse errors
+                            }
+                        }
+                    }
+                }
+                reader.cancel().catch(() => {});
             }
-            continue;
+        } catch (streamErr) {
+            if (streamErr instanceof Error && streamErr.message !== 'Session error') {
+                logger.warn(`${label} stream error:`, streamErr.message);
+            } else {
+                throw streamErr;
+            }
         }
 
-        data = responseRes.data as unknown as AgentPromptResultData;
-        return { data, lastUsedError: null };
+        // If we collected any text, return it
+        if (textContent || reasoningContent) {
+            const resultParts: Array<{ type: string; text: string }> = [];
+            if (reasoningContent) resultParts.push({ type: 'reasoning', text: reasoningContent });
+            if (textContent) resultParts.push({ type: 'text', text: textContent });
+            return { data: { parts: resultParts } as AgentPromptResultData, lastUsedError: null };
+        }
+
+        lastError = new Error(`Prompt timed out after ${Math.round(timeoutMs / 1000)}s`);
+        logger.warn(`${label} attempt ${attempt}/${maxAttempts} timed out`);
+        if (attempt >= maxAttempts) break;
     }
 
     return { data, lastUsedError: lastError };
 }
 
 // ---------------------------------------------------------------------------
-// Shared driver around consumeStreamEvents (RESTRUCTURE #1 - agent streams)
+// Shared driver around consumeV2StreamEvents
 // ---------------------------------------------------------------------------
 
 interface AgentStreamDriverOptions {
     res: Response;
-    client: OpencodeClient;
+    client: V2Client;
+    upstream: ReadableStream<Uint8Array>;
     sessionId: string;
     onFinish: (finish: string) => void;
     onFail: (msg: string) => void;
@@ -165,7 +196,7 @@ interface AgentStreamDriverOptions {
 async function runAgentStreamDriver(opts: AgentStreamDriverOptions): Promise<void> {
     const {
         res,
-        client,
+        upstream,
         sessionId,
         onFinish,
         onFail,
@@ -175,9 +206,6 @@ async function runAgentStreamDriver(opts: AgentStreamDriverOptions): Promise<voi
         onTextDelta,
         getPromptError
     } = opts;
-    const eventStreamResult = await client.event.subscribe();
-    const eventStream = eventStreamResult.stream;
-    const eventIterator = eventStream[Symbol.asyncIterator]();
     const state = { ended: false, streamedAnything: false, insideReasoning: false };
     const keepaliveInterval = setInterval(() => {
         if (!res.destroyed) res.write(': keepalive\n\n');
@@ -187,7 +215,7 @@ async function runAgentStreamDriver(opts: AgentStreamDriverOptions): Promise<voi
         if (state.ended) return;
         state.ended = true;
         clearInterval(keepaliveInterval);
-        if (!res.destroyed) onFinish(finish);
+        if (!res.destroyed) onFinish(finish === 'stop' ? 'stop' : finish);
     };
     const fail = (msg: string) => {
         if (state.ended) return;
@@ -199,8 +227,8 @@ async function runAgentStreamDriver(opts: AgentStreamDriverOptions): Promise<voi
         }
     };
 
-    await consumeStreamEvents({
-        eventIterator,
+    await consumeV2StreamEvents({
+        upstream,
         sessionId,
         res,
         state,
@@ -223,7 +251,6 @@ async function runAgentStreamDriver(opts: AgentStreamDriverOptions): Promise<voi
     });
 
     clearInterval(keepaliveInterval);
-    // Return state to caller via closure if needed; for agent chat we handle externally
 }
 
 // ---------------------------------------------------------------------------
@@ -232,7 +259,7 @@ async function runAgentStreamDriver(opts: AgentStreamDriverOptions): Promise<voi
 
 interface AgentChatStreamOptions {
     res: Response;
-    client: OpencodeClient;
+    client: V2Client;
     providerId: string;
     modelId: string;
     fullPromptText: string;
@@ -263,39 +290,40 @@ async function streamAgentChatCompletion({
     let attemptErrorMsg: string | null = null;
 
     for (let attempt = 1; attempt <= 3 && !res.destroyed; attempt++) {
-        const attemptSession = await client.session.create();
+        const attemptSession = await client.createSession();
         const sessionId = attemptSession.data?.id;
         if (!sessionId) throw new Error('Failed to create session');
+
+        // Switch model
+        await client.switchModel(sessionId, providerId, modelId);
 
         let promptError: Error | null = null;
         attemptErrorMsg = null;
         const state = { ended: false, streamedAnything: false, insideReasoning: false };
 
-        client.session
-            .prompt({
-                path: { id: sessionId },
-                body: {
-                    model: { providerID: providerId, modelID: modelId },
-                    prompt: fullPromptText.trim(),
-                    system: systemPrompt.trim(),
-                    parts: allParts,
-                    tools: toolsMap
-                } as unknown as SessionPromptData['body']
-            })
-            .then((r) => {
-                if (r?.response?.status >= 400) {
-                    promptError = new Error('OpenCode server returned HTTP ' + r.response.status);
-                    logger.warn('Prompt error: HTTP', r.response.status);
-                }
-            })
-            .catch((err) => {
-                promptError = err;
-                logger.warn('Prompt error:', err.message);
-            });
+        // Send the prompt (async in v2)
+        client.prompt(sessionId, fullPromptText.trim(), systemPrompt.trim(), allParts, toolsMap, {
+            providerID: providerId,
+            modelID: modelId
+        }).then((r) => {
+            if (r.error) {
+                promptError = r.error;
+                logger.warn('Prompt error:', r.error.message);
+            }
+        }).catch((err) => {
+            promptError = err;
+            logger.warn('Prompt error:', err.message);
+        });
 
-        const eventStreamResult = await client.event.subscribe();
-        const eventStream = eventStreamResult.stream;
-        const eventIterator = eventStream[Symbol.asyncIterator]();
+        // Subscribe to global event stream
+        const eventStream = await client.subscribeEvents();
+        if (!eventStream) {
+            attemptErrorMsg = 'Failed to subscribe to event stream';
+            if (attempt >= 3) {
+                writeErrorChunk(attemptErrorMsg);
+            }
+            continue;
+        }
 
         const keepaliveInterval = setInterval(() => {
             if (!res.destroyed) res.write(': keepalive\n\n');
@@ -380,8 +408,8 @@ async function streamAgentChatCompletion({
             }
         };
 
-        await consumeStreamEvents({
-            eventIterator,
+        await consumeV2StreamEvents({
+            upstream: eventStream,
             sessionId,
             res,
             state,
@@ -425,7 +453,7 @@ async function streamAgentChatCompletion({
 }
 
 interface AgentChatCompletionOptions {
-    client: OpencodeClient;
+    client: V2Client;
     providerId: string;
     modelId: string;
     fullPromptText: string;
@@ -520,7 +548,7 @@ async function runAgentChatCompletion({
 
 interface AgentResponsesStreamOptions {
     res: Response;
-    client: OpencodeClient;
+    client: V2Client;
     sessionId: string;
     providerId: string;
     modelId: string;
@@ -635,31 +663,30 @@ async function streamAgentResponses({
         attemptErrorMsg = null;
         const state = { ended: false, streamedAnything: false, insideReasoning: false };
 
-        client.session
-            .prompt({
-                path: { id: sessionId },
-                body: {
-                    model: { providerID: providerId, modelID: modelId },
-                    prompt: fullPromptText,
-                    system: systemPrompt,
-                    parts: allParts,
-                    tools: toolsMap
-                } as unknown as SessionPromptData['body']
-            })
-            .then((r) => {
-                if (r?.response?.status >= 400) {
-                    promptError = new Error('OpenCode server returned HTTP ' + r.response.status);
-                    logger.warn('Prompt error: HTTP', r.response.status);
-                }
-            })
-            .catch((err) => {
-                promptError = err;
-                logger.warn('Prompt error:', err.message);
-            });
+        // Switch model
+        await client.switchModel(sessionId, providerId, modelId);
 
-        const eventStreamResult = await client.event.subscribe();
-        const eventStream = eventStreamResult.stream;
-        const eventIterator = eventStream[Symbol.asyncIterator]();
+        // Send the prompt (async in v2)
+        client.prompt(sessionId, fullPromptText, systemPrompt, allParts, toolsMap, {
+            providerID: providerId,
+            modelID: modelId
+        }).then((r) => {
+            if (r.error) {
+                promptError = r.error;
+                logger.warn('Prompt error:', r.error.message);
+            }
+        }).catch((err) => {
+            promptError = err;
+            logger.warn('Prompt error:', err.message);
+        });
+
+        // Subscribe to global event stream
+        const eventStream = await client.subscribeEvents();
+        if (!eventStream) {
+            attemptErrorMsg = 'Failed to subscribe to event stream';
+            if (attempt >= 3) writeErrorEvent(attemptErrorMsg);
+            continue;
+        }
 
         const keepaliveInterval = setInterval(() => {
             if (!res.destroyed) res.write(': keepalive\n\n');
@@ -771,8 +798,8 @@ async function streamAgentResponses({
             }
         };
 
-        await consumeStreamEvents({
-            eventIterator,
+        await consumeV2StreamEvents({
+            upstream: eventStream,
             sessionId,
             res,
             state,
@@ -819,7 +846,7 @@ async function streamAgentResponses({
 }
 
 interface AgentResponsesCompletionOptions {
-    client: OpencodeClient;
+    client: V2Client;
     sessionId: string;
     providerId: string;
     modelId: string;
