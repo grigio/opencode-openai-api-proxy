@@ -17,7 +17,22 @@ jest.unstable_mockModule('../v2-client.ts', () => {
             providers: [{ id: 'opencode', settings: { apiKey: 'public', baseURL: 'https://opencode.ai/zen/v1' } }],
             models: [{ id: 'big-pickle', modelID: 'big-pickle', providerID: 'opencode', name: 'Big Pickle', family: 'big-pickle', package: '@opencode/ai/providers/openai', settings: { apiKey: 'public', baseURL: 'https://opencode.ai/zen/v1' } }]
         })),
-        subscribeEvents: jest.fn(async () => new ReadableStream({ start(c) { c.close(); } })),
+        subscribeEvents: jest.fn(async () => {
+            const sid = 'test-session-id';
+            const events = [
+                { type: 'session.text.delta', data: { sessionID: sid, delta: 'Simulated' } },
+                { type: 'session.text.delta', data: { sessionID: sid, delta: ' response' } },
+                { type: 'session.step.ended', data: { sessionID: sid, finish: 'stop' } }
+            ];
+            const encoder = new TextEncoder();
+            const sseData = events.map(e => `data: ${JSON.stringify(e)}`).join('\n\n') + '\n\n';
+            return new ReadableStream({
+                start(controller) {
+                    controller.enqueue(encoder.encode(sseData));
+                    controller.close();
+                }
+            });
+        }),
         'authHeader': ''
     };
     return { getV2Client: jest.fn(() => client), clientAbortSignal: jest.fn(() => new AbortController().signal) };

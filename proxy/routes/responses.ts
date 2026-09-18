@@ -26,6 +26,8 @@ import {
     hasRequestedTools,
     shouldUseZenDirect,
     shouldUseAgentTools,
+    shouldUseServerAgent,
+    isFreeTierError,
     buildAgentToolsSystem,
     gatewayUnavailableError,
     upstreamErrorInfo,
@@ -358,33 +360,38 @@ async function responsesHandler(req: Request, res: Response): Promise<Response |
                     );
                 } catch (caught) {
                     const zenError = caught as import('../types.ts').UpstreamErrorLike;
-                    logger.error(
-                        '[zen-direct] responses tool call failed, not falling back to in-container tools:',
-                        zenError.message
-                    );
-                    const errorMessage = upstreamErrorInfo(zenError);
-                    return res
-                        .status(
-                            errorMessage.statusCode &&
-                                errorMessage.statusCode >= 400 &&
-                                errorMessage.statusCode < 600
-                                ? errorMessage.statusCode
-                                : 502
-                        )
-                        .json({
-                            error: {
-                                message: `Tool calling failed for "${providerId}/${modelId}": anonymous free-tier zen call failed. ${errorMessage.message}`,
-                                ...(errorMessage.type ? { type: errorMessage.type } : {}),
-                                details:
-                                    'Zen rate limits are transient - retry the request, or set OPENCODE_API_KEY / OPENCODE_TOOL_CALLING=agent to route via the server.'
-                            }
-                        });
+                    if (isFreeTierError(zenError)) {
+                        logger.warn(
+                            `[zen-direct] ${providerId}/${modelId} responses rejected with FreeTierError 403, falling back to server-agent (anonymous like opencode):`,
+                            zenError.message
+                        );
+                        // Fall through to server-agent for 403 – the gateway
+                        // considers this not "within OpenCode", but the local
+                        // server is, so delegate there like the official CLI.
+                    } else {
+                        const info = upstreamErrorInfo(zenError);
+                        return res
+                            .status(
+                                info.statusCode && info.statusCode >= 400 && info.statusCode < 600
+                                    ? info.statusCode
+                                    : 502
+                            )
+                            .json({
+                                error: {
+                                    message: `Tool calling failed for "${providerId}/${modelId}": anonymous free-tier zen call failed. ${info.message}`,
+                                    ...(info.type ? { type: info.type } : {}),
+                                    details:
+                                        'Zen rate limits are transient - retry the request, or set OPENCODE_API_KEY / OPENCODE_TOOL_CALLING=agent to route via the server.'
+                                }
+                            });
+                    }
                 }
             }
-            if (shouldUseAgentTools()) {
-                logger.info(
-                    `[tool-calling] ${providerId}/${modelId} OPENCODE_TOOL_CALLING=agent -> SERVER AGENT (built-in container tools)`
-                );
+            if (shouldUseAgentTools() || shouldUseServerAgent(providerInfo, providerId)) {
+                const via = shouldUseAgentTools()
+                    ? 'OPENCODE_TOOL_CALLING=agent -> SERVER AGENT (built-in container tools)'
+                    : 'anonymous auto -> SERVER AGENT (like opencode, within OpenCode)';
+                logger.info(`[tool-calling] ${providerId}/${modelId} ${via}`);
                 try {
                     const messages = agentResponsesMessages(input, instructions);
                     if (messages.length === 0)
@@ -495,6 +502,77 @@ async function responsesHandler(req: Request, res: Response): Promise<Response |
                 );
             } catch (caught) {
                 const toolError = caught as import('../types.ts').UpstreamErrorLike;
+                if (
+                    isFreeTierError(toolError) &&
+                    providerId === 'opencode' &&
+                    toolError.message?.includes('403')
+                ) {
+                    logger.warn(
+                        `[tool-calling] ${providerId}/${modelId} responses direct gateway FreeTierError 403, retrying via server-agent (anonymous like opencode):`,
+                        toolError.message
+                    );
+                    try {
+                        const messages = agentResponsesMessages(input, instructions);
+                        if (messages.length === 0)
+                            return res.status(400).json({
+                                error: { message: 'input is required', type: 'invalid_request_error' }
+                            });
+                        const { allParts, fullPromptText, systemPrompt } =
+                            await buildPromptPartsAndSystem(messages);
+                        const agentTools =
+                            Array.isArray(tools) && tools.length > 0
+                                ? (tools as import('../types.ts').ToolDefinition[])
+                                : deriveToolsFromMessages(messages);
+                        const systemWithTools = buildAgentToolsSystem(systemPrompt, agentTools);
+                        try {
+                            await client.switchModel('', providerId, modelId);
+                        } catch {}
+                        let agentSessionId = previousState?.sessionId;
+                        if (!agentSessionId) {
+                            const sessionRes = await client.createSession();
+                            agentSessionId = sessionRes.data?.id;
+                            if (!agentSessionId) throw new Error('Failed to create session');
+                        }
+                        const createdAt = Math.floor(Date.now() / 1000);
+                        const responseId = `resp_${crypto.randomUUID()}`;
+                        const outputMessageId = `msg_${crypto.randomUUID()}`;
+                        if (stream) {
+                            await streamAgentResponses({
+                                res,
+                                client,
+                                sessionId: agentSessionId,
+                                providerId,
+                                modelId,
+                                fullPromptText,
+                                systemPrompt: systemWithTools,
+                                allParts,
+                                toolsMap: AGENT_TOOLS_ENABLED,
+                                ignoredTools,
+                                responseId,
+                                createdAt
+                            });
+                            return;
+                        }
+                        return res.json(
+                            await runAgentResponses({
+                                client,
+                                sessionId: agentSessionId,
+                                providerId,
+                                modelId,
+                                fullPromptText,
+                                systemPrompt: systemWithTools,
+                                allParts,
+                                toolsMap: AGENT_TOOLS_ENABLED,
+                                ignoredTools,
+                                responseId,
+                                createdAt,
+                                outputMessageId
+                            })
+                        );
+                    } catch (retryErr) {
+                        logger.error('Server-agent retry after FreeTierError also failed:', (retryErr as Error).message);
+                    }
+                }
                 logger.error('Responses tool calling proxy error:', toolError.message);
                 logToolFailureDiagnostics(
                     providerId,

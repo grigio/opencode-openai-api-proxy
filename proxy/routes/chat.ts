@@ -25,6 +25,8 @@ import {
     hasRequestedTools,
     shouldUseZenDirect,
     shouldUseAgentTools,
+    shouldUseServerAgent,
+    isFreeTierError,
     buildAgentToolsSystem,
     gatewayUnavailableError,
     upstreamErrorInfo,
@@ -356,33 +358,38 @@ async function chatCompletionsHandler(req: Request, res: Response): Promise<Resp
                     );
                 } catch (caught) {
                     const zenError = caught as import('../types.ts').UpstreamErrorLike;
-                    logger.error(
-                        '[zen-direct] tool call failed, not falling back to in-container tools:',
-                        zenError.message
-                    );
-                    const errorMessage = upstreamErrorInfo(zenError);
-                    return res
-                        .status(
-                            errorMessage.statusCode &&
-                                errorMessage.statusCode >= 400 &&
-                                errorMessage.statusCode < 600
-                                ? errorMessage.statusCode
-                                : 502
-                        )
-                        .json({
-                            error: {
-                                message: `Tool calling failed for "${providerId}/${modelId}": anonymous free-tier zen call failed. ${errorMessage.message}`,
-                                ...(errorMessage.type ? { type: errorMessage.type } : {}),
-                                details:
-                                    'Zen rate limits are transient - retry the request, or set OPENCODE_API_KEY / OPENCODE_TOOL_CALLING=agent to route via the server.'
-                            }
-                        });
+                    if (isFreeTierError(zenError)) {
+                        logger.warn(
+                            `[zen-direct] ${providerId}/${modelId} rejected with FreeTierError (403), falling back to server-agent (anonymous like opencode):`,
+                            zenError.message
+                        );
+                        // Fall through to server-agent for 403 – the gateway
+                        // considers this not "within OpenCode", but the local
+                        // server is, so delegate there like the official CLI.
+                    } else {
+                        const info = upstreamErrorInfo(zenError);
+                        return res
+                            .status(
+                                info.statusCode && info.statusCode >= 400 && info.statusCode < 600
+                                    ? info.statusCode
+                                    : 502
+                            )
+                            .json({
+                                error: {
+                                    message: `Tool calling failed for "${providerId}/${modelId}": anonymous free-tier zen call failed. ${info.message}`,
+                                    ...(info.type ? { type: info.type } : {}),
+                                    details:
+                                        'Zen rate limits are transient - retry the request, or set OPENCODE_API_KEY / OPENCODE_TOOL_CALLING=agent to route via the server.'
+                                }
+                            });
+                    }
                 }
             }
-            if (shouldUseAgentTools()) {
-                logger.info(
-                    `[tool-calling] ${providerId}/${modelId} OPENCODE_TOOL_CALLING=agent -> SERVER AGENT (built-in container tools)`
-                );
+            if (shouldUseAgentTools() || shouldUseServerAgent(providerInfo, providerId)) {
+                const via = shouldUseAgentTools()
+                    ? 'OPENCODE_TOOL_CALLING=agent -> SERVER AGENT (built-in container tools)'
+                    : 'anonymous auto -> SERVER AGENT (like opencode, within OpenCode)';
+                logger.info(`[tool-calling] ${providerId}/${modelId} ${via}`);
                 try {
                     const agentBuild = await buildPromptPartsAndSystem(messages as ChatMessage[]);
                     const agentSystem = buildAgentToolsSystem(
@@ -460,6 +467,58 @@ async function chatCompletionsHandler(req: Request, res: Response): Promise<Resp
                 );
             } catch (caught) {
                 const toolError = caught as import('../types.ts').UpstreamErrorLike;
+                // Anonymous free-tier 403 must not be surfaced as 502 – retry
+                // via the server-agent which is "within OpenCode" and succeeds
+                // like the official CLI, instead of exposing the upstream 403.
+                if (
+                    isFreeTierError(toolError) &&
+                    providerId === 'opencode' &&
+                    toolError.message?.includes('403')
+                ) {
+                    logger.warn(
+                        `[tool-calling] ${providerId}/${modelId} direct gateway FreeTierError 403, retrying via server-agent (anonymous like opencode):`,
+                        toolError.message
+                    );
+                    // Retry once via server-agent
+                    try {
+                        const agentBuild = await buildPromptPartsAndSystem(messages as ChatMessage[]);
+                        const agentSystem = buildAgentToolsSystem(
+                            agentBuild.systemPrompt,
+                            tools as import('../types.ts').ToolDefinition[] | undefined
+                        );
+                        try {
+                            await client.switchModel('', providerId, modelId);
+                        } catch {}
+                        if (stream) {
+                            await streamAgentChatCompletion({
+                                res,
+                                client,
+                                providerId,
+                                modelId,
+                                fullPromptText: agentBuild.fullPromptText,
+                                systemPrompt: agentSystem,
+                                allParts: agentBuild.allParts,
+                                toolsMap: AGENT_TOOLS_ENABLED,
+                                ignoredTools
+                            });
+                            return;
+                        }
+                        return res.json(
+                            await runAgentChatCompletion({
+                                client,
+                                providerId,
+                                modelId,
+                                fullPromptText: agentBuild.fullPromptText,
+                                systemPrompt: agentSystem,
+                                allParts: agentBuild.allParts,
+                                toolsMap: AGENT_TOOLS_ENABLED,
+                                ignoredTools
+                            })
+                        );
+                    } catch (retryErr) {
+                        logger.error('Server-agent retry after FreeTierError also failed:', (retryErr as Error).message);
+                    }
+                }
                 logger.error(
                     'Tool calling proxy error:',
                     toolError.message,

@@ -358,8 +358,41 @@ function shouldUseZenDirect(
     providerInfo: import('./types.ts').ProviderGatewayInfo | null | undefined,
     providerId: string
 ): boolean {
+    // In auto mode the anonymous opencode free tier is offered via a direct
+    // zen call so the *client* can execute tools locally (tool_calls are
+    // returned). The gateway gates that pool on `User-Agent: opencode/...`
+    // and on the "You are opencode" system prefix; requests without them get
+    // 429. When the gateway rejects the direct call with 403 FreeTierError
+    // ("can only be used from within OpenCode") the caller falls back to
+    // the server-agent path, which is "within OpenCode" and always succeeds
+    // like the official CLI – this makes anonymous requests behave like
+    // opencode instead of surfacing the 403.
     if (toolCallingMode() !== 'auto') return false;
     return providerId === 'opencode' && isProviderAnonymous(providerInfo);
+}
+
+function shouldUseServerAgent(
+    providerInfo: import('./types.ts').ProviderGatewayInfo | null | undefined,
+    providerId: string
+): boolean {
+    if (toolCallingMode() === 'agent') return true;
+    if (toolCallingMode() !== 'auto') return false;
+    // In auto mode, anonymous opencode providers are "within OpenCode" only
+    // when delegated to the local opencode server. The server creates a real
+    // session/project and is allow-listed, so it never hits the 403 that
+    // direct anonymous zen calls from the proxy now receive.
+    if (providerId === 'opencode' && isProviderAnonymous(providerInfo)) return true;
+    return false;
+}
+
+function isFreeTierError(error: unknown): boolean {
+    const msg = String(
+        (error as { message?: string })?.message ||
+            (error as { response?: { data?: { error?: { message?: string } } } })?.response?.data
+                ?.error?.message ||
+            ''
+    );
+    return /FreeTierError|can only be used from within OpenCode/i.test(msg);
 }
 
 export {
@@ -370,6 +403,9 @@ export {
     hasRequestedTools,
     toolCallingMode,
     shouldUseAgentTools,
+    shouldUseServerAgent,
+    shouldUseZenDirect,
+    isFreeTierError,
     buildAgentToolsSystem,
     logToolFailureDiagnostics,
     reasoningErrorHint,
@@ -382,6 +418,5 @@ export {
     REFUSAL_PATTERN,
     isRefusal,
     SERVER_AGENT_TOOLS,
-    AGENT_TOOLS_ENABLED,
-    shouldUseZenDirect
+    AGENT_TOOLS_ENABLED
 };

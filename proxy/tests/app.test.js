@@ -2044,15 +2044,17 @@ describe('Proxy OpenAI API', () => {
             expect(res.body.output[0].name).toEqual('create_file');
             expect(res.body.finish_reason).toEqual('tool_calls');
 
-            // The upstream hit is the raw zen endpoint (CLI identity headers),
+            // The upstream hit is the raw zen endpoint (User-Agent gated),
             // NOT the opencode server agent via session.prompt.
             expect(global.fetch.mock.calls.length).toEqual(1);
             expect(global.fetch.mock.calls[0][0]).toContain(
                 'https://opencode.ai/zen/v1/chat/completions'
             );
             const reqHeaders = global.fetch.mock.calls[0][1].headers;
-            expect(reqHeaders['x-opencode-client']).toEqual('cli');
-            expect(reqHeaders['x-opencode-session']).toBeTruthy();
+            expect(reqHeaders['User-Agent']).toMatch(/^opencode\//);
+            // The fake x-opencode session headers are no longer sent – the
+            // gateway now rejects spoofed sessions with 403 FreeTierError, so
+            // only the User-Agent is used for the anonymous pool.
 
             // Zen's anonymous pool requires the "You are opencode" system head.
             const body = JSON.parse(global.fetch.mock.calls[0][1].body);
@@ -2161,13 +2163,13 @@ describe('Proxy OpenAI API', () => {
             expect(res.text).toContain('"call_id":"call_1"');
             expect(res.text).toContain('data: [DONE]');
 
-            // Streamed from zen directly with the official CLI identity.
+            // Streamed from zen directly with the official CLI User-Agent.
             expect(global.fetch.mock.calls.length).toEqual(1);
             expect(global.fetch.mock.calls[0][0]).toContain(
                 'https://opencode.ai/zen/v1/chat/completions'
             );
             const reqHeaders = global.fetch.mock.calls[0][1].headers;
-            expect(reqHeaders['x-opencode-client']).toEqual('cli');
+            expect(reqHeaders['User-Agent']).toMatch(/^opencode\//);
 
             expect(client.prompt).not.toHaveBeenCalled();
         } finally {

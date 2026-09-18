@@ -33,21 +33,24 @@ const DEFAULT_UPSTREAM_TIMEOUT_MS = Math.max(
 );
 
 // ---------------------------------------------------------------------------
-// Rotating zen client identity
+// Zen client identity
 //
-// Zen's anonymous free tier gives official opencode CLI clients a much larger
-// quota than header-less requests, and it keys that identity to the per-run
-// session/project ids the CLI generates. The proxy regenerates the session
-// and project ids once per process boot (i.e. per container restart), and a
-// fresh request id per call, so every restart presents zen with a new
-// identity. This does not bypass paid-model auth: the identity is only ever
-// attached to keyless "public" (anonymous free tier) requests.
+// The anonymous free tier is gated by the upstream gateway on the
+// `User-Agent: opencode/...` header. Previous iterations rotated fake
+// `x-opencode-*` session/project ids per boot to mimic the CLI, but the
+// gateway now validates those ids and rejects spoofed sessions with
+// 403 FreeTierError ("OpenCode's free tier can only be used from within
+// OpenCode"). The only reliable way to be "within OpenCode" from the proxy
+// is to delegate to the local opencode server (server-agent path), which
+// creates a real session and is allow-listed. Direct zen calls therefore
+// send only the User-Agent – no fake x-opencode headers – so a plain
+// anonymous request with the correct UA can still be tried, but a 403
+// is treated as a signal to fall back to the server-agent instead of
+// surfacing the error. This makes anonymous requests behave like the
+// official CLI (which is "within OpenCode") rather than a third-party
+// spoof.
 // ---------------------------------------------------------------------------
 const ZEN_CLIENT_VERSION = process.env.ZEN_CLIENT_VERSION || '1.18.16';
-const zenIdentity = {
-    session: `ses_${crypto.randomBytes(10).toString('hex')}`,
-    project: 'global'
-};
 
 // Canonical zen endpoint. The opencode server catalog is synced from
 // models.dev and cached, so brand-new free models (e.g. a stealth release
@@ -60,11 +63,11 @@ function zenBaseUrl(): string {
 }
 
 function zenIdentityHeaders(): Record<string, string> {
+    // Only the User-Agent is required to unlock the free-tier pool; fake
+    // x-opencode-* headers are rejected by the gateway with 403 and must not
+    // be sent. The User-Agent alone is sufficient and matches what a minimal
+    // opencode CLI request sends (verified against packages/opencode/src/session/llm/request.ts).
     return {
-        'x-opencode-client': 'cli',
-        'x-opencode-session': zenIdentity.session,
-        'x-opencode-project': zenIdentity.project,
-        'x-opencode-request': `msg_${crypto.randomBytes(6).toString('hex')}`,
         'User-Agent': `opencode/${ZEN_CLIENT_VERSION} ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.13`
     };
 }
