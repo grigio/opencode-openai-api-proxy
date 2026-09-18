@@ -2,7 +2,7 @@
 FROM node:24-slim
 
 # Pinned versions for reproducible builds
-ARG OPENCODE_VERSION=1.18.16
+ARG OPENCODE_VERSION=1.18.31
 
 # Install minimal dependencies required for OpenCode, Git and PUID/PGID support.
 # gosu is downloaded per architecture and verified by checksum (SHA256) before installation.
