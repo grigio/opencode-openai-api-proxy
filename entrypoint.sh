@@ -67,8 +67,8 @@ seed_auth_key() {
 }
 seed_auth_key
 
-# Check if we are running the default server command
-if [[ "$1" == "opencode" && "$2" == "serve" ]]; then
+# Check if we are running the default server command (v1: "opencode", v2: "opencode2")
+if [[ "$1" == opencode* && "$2" == "serve" ]]; then
     echo "Initializing OpenCode Super Mode (Server + Proxy)"
     
     # Start the OpenCode server in the background

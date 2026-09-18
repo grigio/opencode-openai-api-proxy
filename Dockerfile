@@ -1,8 +1,10 @@
 # Pinned Node 24 slim - matches .nvmrc and ensures type-stripping support (Node >= 23.6)
 FROM node:24-slim
 
-# Pinned versions for reproducible builds
-ARG OPENCODE_VERSION=1.18.31
+# OpenCode v2 (beta) — installed via the @opencode-ai/cli package.
+# The v2 binary is called "opencode2" during beta.
+# The "next" dist-tag always points to the latest beta build.
+ARG OPENCODE_CLI_TAG=next
 
 # Install minimal dependencies required for OpenCode, Git and PUID/PGID support.
 # gosu is downloaded per architecture and verified by checksum (SHA256) before installation.
@@ -22,8 +24,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && gosu --version \
     && rm -rf /var/lib/apt/lists/*
 
-# Install OpenCode globally via NPM (pinned version)
-RUN npm install -g "opencode-ai@${OPENCODE_VERSION}" \
+# Install OpenCode v2 CLI globally via NPM
+RUN npm install -g "@opencode-ai/cli@${OPENCODE_CLI_TAG}" \
     && npm cache clean --force
 
 # Create directories for data and config persistence
@@ -71,4 +73,4 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 
 # Default command
-CMD ["opencode", "serve", "--hostname", "0.0.0.0", "--port", "4097"]
+CMD ["opencode2", "serve", "--hostname", "0.0.0.0", "--port", "4097"]
