@@ -182,7 +182,7 @@ describe('Proxy OpenAI API', () => {
             .post('/v1/chat/completions')
             .set('Authorization', 'Bearer test-password')
             .send({
-                model: 'not-a-valid-model',
+                model: 'opencode/',
                 messages: [{ role: 'user', content: 'Hello' }]
             });
 
@@ -299,8 +299,8 @@ describe('Proxy OpenAI API', () => {
 
         expect(res.statusCode).toEqual(200);
         expect(res.header['content-type']).toContain('text/event-stream');
-        expect(res.text).toContain('<think>');
-        expect(res.text).toContain('</think>');
+        expect(res.text).toContain('"reasoning_content":"Thinking..."');
+        expect(res.text).not.toContain('<think>');
         expect(res.text).toContain('data: [DONE]');
     });
 
@@ -430,10 +430,10 @@ describe('Proxy OpenAI API', () => {
 
         expect(res.statusCode).toEqual(200);
 
-        const thinkOpenCount = (res.text.match(/<think>/g) || []).length;
-        const thinkCloseCount = (res.text.match(/<\/think>/g) || []).length;
-        expect(thinkOpenCount).toEqual(1);
-        expect(thinkCloseCount).toEqual(1);
+        expect(res.text).not.toContain('<think>');
+        expect(res.text).not.toContain('</think>');
+        expect(res.text).toContain('"reasoning_content"');
+        expect(res.text).toContain('"content":"1+1"');
     });
 
     test('POST /v1/chat/completions should stream cumulative part.text and skip user echo', async () => {
@@ -471,8 +471,8 @@ describe('Proxy OpenAI API', () => {
             });
 
         expect(res.statusCode).toEqual(200);
-        expect(res.text).toContain('<think>');
-        expect(res.text).toContain('</think>');
+        expect(res.text).toContain('"reasoning_content":"Thinking..."');
+        expect(res.text).not.toContain('<think>');
         expect(res.text).toContain('"content":"Banana"');
         expect(res.text).toContain('"content":"!"');
         expect(res.text).not.toContain('Stream a short answer');
@@ -513,11 +513,10 @@ describe('Proxy OpenAI API', () => {
             });
 
         expect(res.statusCode).toEqual(200);
-        expect(res.body.choices[0].message.content).toContain(
-            '<think>\nThinking process...\n</think>\n\nSimulated response'
-        );
+        expect(res.body.choices[0].message.content).toEqual('Simulated response');
+        expect(res.body.choices[0].message.content).not.toContain('<think>');
+        expect(res.body.choices[0].message.reasoning_content).toEqual('Thinking process...');
         expect(res.body.usage.completion_tokens_details.reasoning_tokens).toBeGreaterThan(0);
-        expect(res.body.choices[0].message.reasoning_content).toBeUndefined();
     });
 
     test('POST /v1/responses should return response format in non-streaming', async () => {
@@ -1651,8 +1650,9 @@ describe('Proxy OpenAI API', () => {
         expect(res.body.choices[0].message.tool_calls[0].function.arguments).toEqual(
             '{"city":"Rome"}'
         );
-        // reasoning_content is folded into content with <think> tags
-        expect(res.body.choices[0].message.content).toContain('<think>');
+        // reasoning_content is now separated (not folded into <think> tags)
+        expect(res.body.choices[0].message.content).not.toContain('<think>');
+        expect(res.body.choices[0].message.reasoning_content).toBeDefined();
 
         const callArgs = JSON.parse(global.fetch.mock.calls[0][1].body);
         expect(callArgs.messages[0].content).toEqual('Weather in Rome?');
@@ -2124,7 +2124,9 @@ describe('Proxy OpenAI API', () => {
 
     test('POST /v1/responses with anonymous opencode + tools streams function_call events straight from zen (default routing)', async () => {
         const originalMode = process.env.OPENCODE_TOOL_CALLING;
+        const originalZenDirect = process.env.ZEN_DIRECT_ENABLED;
         process.env.OPENCODE_TOOL_CALLING = 'auto';
+        process.env.ZEN_DIRECT_ENABLED = '1';
         const client = getV2Client();
         client.prompt.mockClear();
         client.createSession.mockClear();
@@ -2226,6 +2228,7 @@ describe('Proxy OpenAI API', () => {
             expect(client.prompt).not.toHaveBeenCalled();
         } finally {
             process.env.OPENCODE_TOOL_CALLING = originalMode || 'direct';
+            process.env.ZEN_DIRECT_ENABLED = originalZenDirect;
         }
     });
 
@@ -3187,8 +3190,8 @@ describe('Proxy OpenAI API', () => {
         expect(res.statusCode).toEqual(200);
         expect((res.text.match(/Think/g) || []).length).toEqual(1);
         expect((res.text.match(/Answer/g) || []).length).toEqual(1);
-        expect(res.text).toContain('<think>');
-        expect(res.text).toContain('</think>');
+        expect(res.text).toContain('"reasoning_content":"Thinking"');
+        expect(res.text).not.toContain('<think>');
         expect(res.text).toContain('data: [DONE]');
     });
 
@@ -4656,7 +4659,9 @@ describe('Proxy OpenAI API', () => {
 
     test('zen-direct must flag tool-call arguments cut off mid-JSON even on a clean EOF', async () => {
         const originalMode = process.env.OPENCODE_TOOL_CALLING;
+        const originalZenDirect = process.env.ZEN_DIRECT_ENABLED;
         process.env.OPENCODE_TOOL_CALLING = 'auto';
+        process.env.ZEN_DIRECT_ENABLED = '1';
         global.fetch.mockResolvedValue({
             ok: true,
             status: 200,
@@ -4709,6 +4714,7 @@ describe('Proxy OpenAI API', () => {
             expect(res.text).toContain('data: [DONE]');
         } finally {
             process.env.OPENCODE_TOOL_CALLING = originalMode || 'direct';
+            process.env.ZEN_DIRECT_ENABLED = originalZenDirect;
         }
     });
 

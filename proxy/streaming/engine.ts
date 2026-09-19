@@ -567,9 +567,11 @@ export async function streamResponsesWithResumption(opts: {
         let idleTick: (() => void) | null = null;
         let clearIdle: (() => void) | null = null;
         try {
-            const identityHeaders = zenDirectBaseUrl
-                ? await (await import('../model-gateway.ts')).getZenIdentityHeaders()
-                : undefined;
+            const isAnonOpencode = providerId === 'opencode' && !providerInfo.apiKey;
+            const identityHeaders =
+                zenDirectBaseUrl || isAnonOpencode
+                    ? await (await import('../model-gateway.ts')).getZenIdentityHeaders()
+                    : undefined;
             const result = (await callChatCompletionsWithImageFallback({
                 ...providerInfo,
                 messages,
@@ -579,13 +581,8 @@ export async function streamResponsesWithResumption(opts: {
                 stream: true,
                 signal: clientAbortSignal(req),
                 ...sampling,
-                ...(zenDirectBaseUrl && identityHeaders
-                    ? {
-                          baseUrl: zenDirectBaseUrl,
-                          apiKey: null,
-                          identityHeaders
-                      }
-                    : {})
+                ...(identityHeaders ? { identityHeaders } : {}),
+                ...(zenDirectBaseUrl ? { baseUrl: zenDirectBaseUrl, apiKey: null } : {})
             })) as unknown as {
                 stream: ReadableStream<Uint8Array>;
                 signal: AbortSignal;

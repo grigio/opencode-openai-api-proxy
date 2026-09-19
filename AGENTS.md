@@ -1,22 +1,19 @@
 # opencode-openai-api-proxy
+OpenAI `/v1/*` → opencode v2.0.5 (`reasoning_content`).
 
-Proxy that makes **opencode v2.0.5-identical** requests to the backend and exposes an OpenAI-compatible API (`/v1/chat/completions`, `/v1/responses`, `/v1/models`).
+## Run
+`OPENCODE_SERVER_PASSWORD=secret ./start-proxy.sh` — seeds `password`+`auth.json`, starts `opencode serve --port 4097` if needed, healthchecks, then `node proxy/index.ts:45` (Node ≥23.6, host FS). Docker: `docker compose up -d` (`entrypoint.sh:94`).
+Ports `4096` proxy Bearer vs `4097` server Basic `opencode:<password>`. Session `directory` from `Current working directory:` or `X-Working-Directory`/`OPENCODE_PROJECT_DIR` (`proxy/v2-client.ts:171`).
 
-## Architecture
+## Env
+`OPENCODE_SERVER_PASSWORD` required. `OPENCODE_TOOL_CALLING=auto|agent|direct` — `auto` zen-direct non-streaming anonymous (`403`→`agent` fallback `proxy/utils.ts:387`, streaming skips zen `proxy/routes/*:360`). `OPENCODE_API_KEY`/`ZEN_BASE_URL`, `ZEN_DIRECT_ENABLED=1`. Single-instance `previous_response_id` 30m `proxy/state.ts:11`.
 
-- **Ports:** `4096` OpenAI proxy (Bearer `OPENCODE_SERVER_PASSWORD`), `4097` opencode server (Basic `opencode:<password>`). `entrypoint.sh` boots the server, health-checks `/api/health`, then runs the proxy via Node native type stripping (Node ≥23.6).
-- **V2 client `proxy/v2-client.ts`:** Speaks `/api/session` (create), `/api/session/:id/model` (`{model:{providerID,id}}`), `/api/session/:id/prompt` (`{text, files:[{uri,name}], agents, skills}`), `/api/provider` & `/api/model` (both return `{location,data}`), and `GET /api/event` SSE. Handles `204`/`""` bodies and `{prompt:{}}`↔`{text}` fallback.
-- **Gateway `proxy/model-gateway.ts`:** Resolves `provider/model` → `{baseUrl, apiKey, supportsImages}`. Anonymous `opencode/*` uses `ZEN_BASE_URL` (`https://zenmux.ai/api/v1` via `ZenmuxPlugin`) plus real affinity headers; authenticated (`OPENCODE_API_KEY`/`auth.json`) uses provider `apiKey`. Retries `408/429/5xx` and network resets (non-streaming only, `UPSTREAM_MAX_RETRIES`).
-- **Routing `proxy/routes/*` + `proxy/streaming/*`:** `auto` (default) → zen-direct for anonymous `opencode/*` (client executes tools, system head injected, real `ses_…`/`projectID` + `User-Agent: opencode/<channel>/2.0.5/opencode` + `HTTP-Referer`/`X-Title` for zenmux; `403 FreeTierError` → server-agent fallback), `direct` → always provider gateway, `agent` (`OPENCODE_TOOL_CALLING=agent`) → server-agent (tools run in-container). Both `flat` and `nested` tool definitions are normalized.
-- **State:** `proxy/state.ts` stores `previous_response_id` continuations in-memory (30 min TTL, LRU 1000) — single instance only.
-- **Images `proxy/prompts.ts`+`proxy/image.ts`:** `image_url`→`data:` URI via SSRF-safe fetch (`resolveSafeImageUrl`, `redirect:manual`, 20 MB/10 s), then `POST /prompt` as `files:[{uri:data:…}]`. Stripped/retried for text-only models (DeepSeek family).
+## Clients
+Codex (`wire_api = "responses"`): bundled catalog only has `gpt-*`; `opencode/*` without `model_catalog_json` falls back and disables `apply_patch` (`tools/spec_plan.rs:312`, `model_info_from_slug` fallback). Fix: `codex debug models --bundled > /tmp/b.json && python3 scripts/generate-codex-catalog.py /tmp/b.json ~/.codex/opencode-catalog.json` then `model_catalog_json = "~/.codex/opencode-catalog.json"` in `~/.codex/config.toml`. Prefer `opencode/muse-spark-1.3-contributor-free` for code (mimo weak on tool calls). Anonymous free tier streaming is forced to `server-agent` (`proxy/routes/*:360` `payg-blocked` skip) — writes land in the proxy host's workspace (host FS via `start-proxy.sh:94`, container FS via `docker compose` volume), so use project-relative paths not `/tmp`. For client-side `apply_patch` (local FS) set `OPENCODE_API_KEY` (or `opencode auth login`) so `zen-direct` succeeds.
+Pi (`~/.pi/agent/models.json` / `settings.json`): proxy accepts bare `mimo-v2.5-free` (pi short ids default to `opencode/`). Set `{"defaultProvider":"opencode","defaultModel":"muse-spark-1.3-contributor-free"}`. Free tier also needs `OPENCODE_TOOL_CALLING=agent`; `write`/`read` respect `X-Working-Directory`/`OPENCODE_PROJECT_DIR` (`proxy/v2-client.ts:171`) — set it when Docker container can't see host path.
 
-## Key env
+## Skills
+`~/.pi/agent/skills/*` → `~/.config/opencode/skills/`. `read` sandboxed to session `location.directory` hangs on `~/.pi` from `/tmp` — use `bash cat` (`proxy/utils.ts:109`).
 
-`OPENCODE_SERVER_PASSWORD` (required), `OPENCODE_API_KEY`/`ZEN_BASE_URL`/`ZEN_CLIENT_VERSION=2.0.5`/`OPENCODE_TOOL_CALLING=auto|agent|direct`/`TOOL_LOOP_LIMIT`/`UPSTREAM_MAX_RETRIES`/`UPSTREAM_TIMEOUT_MS`/`MAX_BODY_MB`/`HTTPS_PROXY` etc. See `README.md` table.
-
-## Development
-
-- `cd proxy && npm install && npm run typecheck && npm test` (Jest + `@swc/jest`, `tsc --noEmit` must pass). No build step — `node index.ts` via type stripping.
-- `docker build -t local/opencode-openai-api-proxy .` respects `.dockerignore`; `COPY proxy/ /usr/src/proxy/` keeps cache.
-- Tests mock `V2Client` (e.g. `getProvidersAndModels`, `prompt`, `createSession`, `subscribeEvents`) and `global.fetch` for the direct gateway SSE (`data: …\n\n` + `data: [DONE]`).
+## Dev
+`cd proxy && npm run typecheck && npm test` — native type stripping, mocks `V2Client`+`fetch` SSE.

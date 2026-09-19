@@ -147,7 +147,7 @@ The proxy translates OpenAI format calls to the internal OpenCode SDK transparen
 
 - **Base URL:** `http://localhost:4096/v1`
 - **API Key:** Use the password defined in `OPENCODE_SERVER_PASSWORD`.
-- **Models:** Use the `provider/model-id` format. Examples: `opencode/x-preview-f-free` (Free), `opencode/big-pickle` (Free), `anthropic/claude-3-5-sonnet`.
+- **Models:** Use the `provider/model-id` format. Examples: `opencode/mimo-v2.5-free` (Free), `opencode/muse-spark-1.2-contributor-free` (Free), `opencode/big-pickle` (Free). Bare `mimo-v2.5-free` also accepted (pi compatibility).
 
 > **Brand-new zen models:** the OpenCode server resolves its provider catalog from a cached
 > models.dev snapshot, so a stealth free release (e.g. `x-preview-f-free`) can be requested
@@ -223,11 +223,11 @@ Note: `/v1/responses` supports text/multimodal + streaming + `previous_response_
 
 ### OpenAI Codex CLI
 
-The proxy is compatible with [OpenAI Codex CLI](https://github.com/openai/codex) (>= 0.146.0, which only supports the Responses wire API). Point Codex at the proxy with the model in `providerId/modelId` form:
+The proxy is compatible with [OpenAI Codex CLI](https://github.com/openai/codex) (>= 0.146.0, `wire_api = "responses"`). Point Codex at the proxy with `providerId/modelId`:
 
 ```toml
 # ~/.codex/config.toml
-model = "opencode/hy3-free"  # stable for tool calling; x-preview-f-free is rate-limited on the anonymous free tier
+model = "opencode/muse-spark-1.3-contributor-free"  # prefer Spark for code; mimo weak on tools
 model_provider = "mia"
 
 [model_providers.mia]
@@ -235,32 +235,41 @@ name = "mia"
 base_url = "http://localhost:4096/v1"
 wire_api = "responses"
 experimental_bearer_token = "<YOUR_PASSWORD>"
-# alternative: set MIA_API_KEY="..." and use env_key = "MIA_API_KEY"
 ```
 
-Codex's built-in tools (`shell`, `apply_patch`, `web_search`, ...) are relayed to the underlying model API, so the agent loop runs with the client executing tools locally.
+* **Missing metadata warning** — Codex bundled catalog only has `gpt-*`; `opencode/*` without `model_catalog_json` falls back and disables `apply_patch` (`Model metadata for opencode/mimo-v2.5-free not found`). Fix:
 
-> **Stable models for Codex/Pi:** `opencode/hy3-free` and `opencode/nemotron-3.5-lightning-free` handle tool calling reliably on the anonymous free tier. `opencode/x-preview-f-free` and `opencode/muse-spark-1.2-contributor-free` are currently intermittently unavailable for tool calls via the free tier (`Endpoint is unavailable` / `Internal server error`); use them with `OPENCODE_API_KEY` or switch models if you see no replies.
+  ```bash
+  codex debug models --bundled > /tmp/b.json
+  python3 scripts/generate-codex-catalog.py /tmp/b.json ~/.codex/opencode-catalog.json
+  # ~/.codex/config.toml:
+  model_catalog_json = "~/.codex/opencode-catalog.json"
+  ```
+
+  Script clones the bundled template into `opencode/*` entries (`apply_patch: freeform`, `tool_mode: code_mode_only`). Verify with `codex debug models | grep opencode`.
+
+* **Free-tier file creation** — anonymous `opencode/*` streaming is forced to `server-agent` (`payg-blocked` skip, `proxy/routes/*:360`), so `apply_patch`/`shell` run **inside the proxy host** (`start-proxy.sh` = host FS, Docker = container FS). Use project-relative paths (`./tmp_out/foo.txt` not `/tmp/foo.txt`) and set `OPENCODE_TOOL_CALLING=agent` for anonymous. For client-side local `apply_patch` (true Codex workspace), set `OPENCODE_API_KEY` (or `opencode auth login`) so `zen-direct` succeeds and tools run locally.
 
 ### Pi Coding Agent
 
-[Pi](https://github.com/badlogic/pi-mono) uses `~/.pi/agent/models.json` (`api: "openai-completions"`). Use a provider id that matches the model prefix (`opencode`) so the default model resolves correctly:
+[Pi](https://github.com/badlogic/pi-mono) uses `~/.pi/agent/models.json`. Override the built-in `opencode` provider (no `models` array needed):
 
 ```json
 {
   "providers": {
     "opencode": {
       "baseUrl": "http://localhost:4096/v1",
-      "apiKey": "YOUR_PASSWORD",
       "api": "openai-completions",
-      "models": [
-        { "id": "opencode/hy3-free", "reasoning": true },
-        { "id": "opencode/nemotron-3.5-lightning-free", "reasoning": true }
-      ]
+      "apiKey": "YOUR_PASSWORD"
     }
   }
 }
 ```
+
+Set `~/.pi/agent/settings.json` to `{"defaultProvider":"opencode","defaultModel":"muse-spark-1.3-contributor-free"}`. Proxy accepts `opencode/mimo-v2.5-free` and bare `mimo-v2.5-free` (pi short ids default to `opencode/`).
+
+* Free tier needs `OPENCODE_TOOL_CALLING=agent` (same `payg` limit). Test: `pi --offline --model muse-spark-1.3-contributor-free -p "say hi"`.
+* **Docker host FS** — `write`/`read` respect `X-Working-Directory`/`OPENCODE_PROJECT_DIR` (`proxy/v2-client.ts:171`). When the container can't see the host path, start with `-e OPENCODE_PROJECT_DIR=/host/project -v /host/project:/host/project` and pass `X-Working-Directory` or run via `start-proxy.sh` (host FS, no mount needed).
 
 ---
 

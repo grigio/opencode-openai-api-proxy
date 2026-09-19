@@ -47,9 +47,6 @@ function buildFinalMessage(message: ChatMessage): Record<string, unknown> {
     if (typeof message.content === 'string') content = message.content;
     else if (Array.isArray(message.content)) content = JSON.stringify(message.content);
     else content = (message.content as unknown as string) || '';
-    if (message.reasoning_content) {
-        content = `<think>\n${message.reasoning_content}\n</think>\n\n${content || ''}`;
-    }
     const result: Record<string, unknown> = { role: 'assistant', content: content || '' };
     if (Array.isArray(message.tool_calls) && message.tool_calls.length > 0) {
         result.tool_calls = message.tool_calls;
@@ -115,7 +112,13 @@ function buildAgentToolsSystem(system: string, tools: ToolDefinition[] | undefin
         'yourself end-to-end using your own built-in tools (bash, write, edit, webfetch, read, glob, grep, ls) ' +
         'inside the container. Never ask the user to run commands or paste results back - perform every step ' +
         'yourself and reply with the final outcome as normal text.';
-    return system ? `${system}\n\n${notice}` : notice;
+    // Skill files at ~/.pi/agent/skills/* are outside the session's location.directory
+    // (e.g. /tmp/tmp.xxx from pi). The opencode `read` tool is sandboxed to that directory
+    // and hangs on `read` of skill files, while `bash cat` works. Nudge the model to use bash for skills.
+    const skillHint =
+        ' For skill files at /home/g/.pi/agent/skills/* or /home/g/.config/opencode/skills/*, prefer `bash` with `cat` over `read` (e.g. `cat /home/g/.pi/agent/skills/duckduckgo/SKILL.md`) as `read` is sandboxed to the session directory and will hang; `bash` can read them from any session.';
+    const fullNotice = notice + skillHint;
+    return system ? `${system}\n\n${fullNotice}` : fullNotice;
 }
 
 function logToolFailureDiagnostics(
@@ -365,10 +368,11 @@ function shouldUseZenDirect(
     // returned). The gateway gates that pool on `User-Agent: opencode/...`
     // and on the "You are opencode" system prefix; requests without them get
     // 429. When the gateway rejects the direct call with 403 FreeTierError
-    // ("can only be used from within OpenCode") the caller falls back to
-    // the server-agent path, which is "within OpenCode" and always succeeds
-    // like the official CLI – this makes anonymous requests behave like
-    // opencode instead of surfacing the 403.
+    // ("can only be used from within OpenCode") or the newer payg/access_denied
+    // ("You have no permission to access this resource (api_key_source: payg)")
+    // the caller falls back to the server-agent path, which is "within
+    // OpenCode" and always succeeds like the official CLI – this makes
+    // anonymous requests behave like opencode instead of surfacing the 403.
     if (toolCallingMode() !== 'auto') return false;
     return providerId === 'opencode' && isProviderAnonymous(providerInfo);
 }
@@ -388,13 +392,30 @@ function shouldUseServerAgent(
 }
 
 function isFreeTierError(error: unknown): boolean {
-    const msg = String(
-        (error as { message?: string })?.message ||
-            (error as { response?: { data?: { error?: { message?: string } } } })?.response?.data
-                ?.error?.message ||
-            ''
+    const err = error as
+        | {
+              message?: string;
+              type?: string;
+              response?: {
+                  status?: number;
+                  data?: { error?: { message?: string; type?: string } };
+              };
+          }
+        | null
+        | undefined;
+    const msg = String(err?.message || err?.response?.data?.error?.message || '');
+    const type = String(err?.type || err?.response?.data?.error?.type || '');
+    const combined = `${msg} ${type}`;
+    // FreeTierError is the legacy gateway rejection ("can only be used from
+    // within OpenCode"). Newer zenmux gateway returns payg/access_denied for
+    // anonymous tool calls: "You have no permission to access this resource
+    // (api_key_source: payg)". Both must trigger the server-agent fallback.
+    return (
+        /FreeTierError|can only be used from within OpenCode/i.test(combined) ||
+        /payg|api_key_source/i.test(combined) ||
+        /access_denied/i.test(combined) ||
+        /have no permission to access this resource/i.test(combined)
     );
-    return /FreeTierError|can only be used from within OpenCode/i.test(msg);
 }
 
 export {

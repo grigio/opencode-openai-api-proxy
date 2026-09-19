@@ -9,6 +9,22 @@ import { buildResponsesUsage } from '../utils.ts';
 import { logger } from '../logger.ts';
 import type { V2Client } from '../v2-client.ts';
 
+function inferDirectoryFromPrompt(promptText?: string, systemText?: string): string | undefined {
+    const envDir = process.env.OPENCODE_PROJECT_DIR?.trim() || process.env.OPENCODE_CWD?.trim();
+    if (envDir && envDir.startsWith('/')) return envDir;
+    const combined = `${systemText || ''}\n${promptText || ''}`;
+    // See proxy/v2-client.ts: skill files at ~/.pi are outside the inferred cwd (e.g. /tmp/tmp.xxx)
+    // and `read` hangs sandboxed; `bash cat` is forced via buildAgentToolsSystem hint.
+    const m =
+        combined.match(/Current working directory:\s*([^\s\n'"]+)/i) ||
+        combined.match(/\bcwd\s*[:=]\s*([^\s\n'"]+)/i) ||
+        combined.match(/working dir(?:ectory)?\s*[:=]\s*([^\s\n'"]+)/i);
+    if (m && m[1] && m[1].startsWith('/')) {
+        return m[1].replace(/[.,;:'"]+$/, '');
+    }
+    return undefined;
+}
+
 interface RunAgentPromptOptions {
     client: V2Client;
     sessionId?: string;
@@ -65,7 +81,10 @@ async function runAgentPromptWithRetry({
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
         let attemptSessionId = sessionId;
         if (!attemptSessionId) {
-            const created = await client.createSession();
+            const inferredDir = inferDirectoryFromPrompt(prompt, system);
+            const created = await client.createSession(
+                inferredDir ? { directory: inferredDir } : undefined
+            );
             attemptSessionId = created.data?.id;
             if (!attemptSessionId) throw new Error('Failed to create session');
         }
@@ -330,7 +349,10 @@ async function streamAgentChatCompletion({
     let attemptErrorMsg: string | null = null;
 
     for (let attempt = 1; attempt <= 3 && !res.destroyed; attempt++) {
-        const attemptSession = await client.createSession();
+        const inferredDir = inferDirectoryFromPrompt(fullPromptText, systemPrompt);
+        const attemptSession = await client.createSession(
+            inferredDir ? { directory: inferredDir } : undefined
+        );
         const sessionId = attemptSession.data?.id;
         if (!sessionId) throw new Error('Failed to create session');
 
@@ -353,9 +375,20 @@ async function streamAgentChatCompletion({
             );
         };
 
+        const writeReasoningDelta = (reasoning: string) => {
+            res.write(
+                `data: ${JSON.stringify({
+                    id,
+                    object: 'chat.completion.chunk',
+                    created: Math.floor(Date.now() / 1000),
+                    model: `${providerId}/${modelId}`,
+                    choices: [{ index: 0, delta: { reasoning_content: reasoning }, finish_reason: null }]
+                })}\n\n`
+            );
+        };
+
         const closeReasoningTag = () => {
             if (!state.insideReasoning) return;
-            writeChatDelta('\n</think>\n\n');
             state.insideReasoning = false;
         };
 
@@ -460,13 +493,15 @@ async function streamAgentChatCompletion({
             onFinish: (finish) => finalize(finish === 'stop' ? 'stop' : finish),
             onFail: (msg) => failAttempt(msg),
             onReasoningStart: () => {
-                writeChatDelta('<think>\n');
+                state.insideReasoning = true;
             },
             onReasoningDelta: (delta) => {
                 reasoningTokens += Math.ceil(delta.length / 4);
-                writeChatDelta(delta);
+                writeReasoningDelta(delta);
             },
-            onReasoningEnd: () => closeReasoningTag(),
+            onReasoningEnd: () => {
+                state.insideReasoning = false;
+            },
             onTextDelta: (delta) => {
                 completionTokens += Math.ceil(delta.length / 4);
                 writeChatDelta(delta);
@@ -559,9 +594,6 @@ async function runAgentChatCompletion({
         completion_tokens_details: { reasoning_tokens: Math.ceil(reasoningTokens) }
     };
 
-    let finalContent = content;
-    if (reasoningContent) finalContent = `<think>\n${reasoningContent}\n</think>\n\n${content}`;
-
     const result: Record<string, unknown> = {
         id: `chatcmpl-${crypto.randomUUID()}`,
         object: 'chat.completion',
@@ -570,7 +602,11 @@ async function runAgentChatCompletion({
         choices: [
             {
                 index: 0,
-                message: { role: 'assistant', content: finalContent },
+                message: {
+                    role: 'assistant',
+                    content,
+                    ...(reasoningContent ? { reasoning_content: reasoningContent } : {})
+                },
                 finish_reason: 'stop'
             }
         ],

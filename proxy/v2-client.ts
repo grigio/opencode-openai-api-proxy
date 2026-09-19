@@ -168,11 +168,30 @@ export class V2Client {
 
     // ----- Session methods -----
 
-    async createSession(): Promise<{ data?: { id: string; projectID?: string }; error?: Error }> {
+    async createSession(
+        opts?: string | { directory?: string | null } | null
+    ): Promise<{ data?: { id: string; projectID?: string }; error?: Error }> {
+        let directory: string | undefined;
+        if (typeof opts === 'string') directory = opts;
+        else if (opts && typeof opts === 'object' && typeof opts.directory === 'string')
+            directory = opts.directory;
+        // Env override mirrors AGENTS.md workaround: pi --session cwd not forwarded,
+        // so bare `ls` lists proxy/ not the client's dir (use absolute paths or set
+        // OPENCODE_PROJECT_DIR). Also honor explicit directory from caller.
+        if (!directory) {
+            directory =
+                process.env.OPENCODE_PROJECT_DIR?.trim() ||
+                process.env.OPENCODE_CWD?.trim() ||
+                undefined;
+        }
+        // Validate: must be absolute path when set
+        if (directory && !directory.startsWith('/')) directory = undefined;
         try {
+            const body: Record<string, unknown> = {};
+            if (directory) body.location = { directory };
             const { data } = await this.fetchJson<{ data: V2SessionInfo }>('/api/session', {
                 method: 'POST',
-                body: JSON.stringify({})
+                body: JSON.stringify(body)
             });
             if (!data?.data) return { data: undefined };
             // Keep full session info so callers can use projectID for affinity headers
@@ -180,6 +199,34 @@ export class V2Client {
         } catch (e) {
             return { error: e as Error };
         }
+    }
+
+    /**
+     * Extract a working directory from prompt/system text. Pi and similar
+     * agents embed "Current working directory: /path" in the system prompt;
+     * using it for session.location.directory makes agent tools (write/bash/
+     * read) operate on the client's files instead of the proxy repo root
+     * (AGENTS.md limitation). Also checks OPENCODE_PROJECT_DIR env.
+     */
+    static inferDirectoryFromPrompt(promptText?: string, systemText?: string): string | undefined {
+        const envDir =
+            process.env.OPENCODE_PROJECT_DIR?.trim() || process.env.OPENCODE_CWD?.trim();
+        if (envDir && envDir.startsWith('/')) return envDir;
+        const combined = `${systemText || ''}\n${promptText || ''}`;
+        // If the prompt references pi skills at ~/.pi (outside the session's cwd like /tmp/tmp.xxx),
+        // the opencode `read` tool hangs when sandboxed to that cwd (see proxy/utils.ts buildAgentToolsSystem).
+        // Prefer the skill's parent so `read` can succeed, but `bash cat` is the reliable fallback.
+        // We still return the inferred cwd for normal file ops; skill handling is via the system hint above.
+        // Matches "Current working directory: /tmp" or "cwd: /tmp/foo" variants
+        const m =
+            combined.match(/Current working directory:\s*([^\s\n'"]+)/i) ||
+            combined.match(/\bcwd\s*[:=]\s*([^\s\n'"]+)/i) ||
+            combined.match(/working dir(?:ectory)?\s*[:=]\s*([^\s\n'"]+)/i);
+        if (m && m[1] && m[1].startsWith('/')) {
+            // Strip trailing punctuation that may follow the path in prompt text
+            return m[1].replace(/[.,;:'"]+$/, '');
+        }
+        return undefined;
     }
 
     /**
@@ -234,14 +281,41 @@ export class V2Client {
             // Model is set via POST /api/session/:id/model, not in prompt body.
             // We keep the switchModel() call separate (caller does it before prompt).
 
-            const { data } = await this.fetchJson<{ data: Record<string, unknown> }>(
-                `/api/session/${sessionId}/prompt`,
-                {
-                    method: 'POST',
-                    body: JSON.stringify(payload)
+            try {
+                const { data } = await this.fetchJson<{ data: Record<string, unknown> }>(
+                    `/api/session/${sessionId}/prompt`,
+                    {
+                        method: 'POST',
+                        body: JSON.stringify(payload)
+                    }
+                );
+                return { data: data?.data };
+            } catch (err) {
+                const msg = String((err as Error)?.message || "");
+                // Host standalone v2.0.5 expects bare {text,...} while stable 1.18.31
+                // expects {prompt:{text,...}}. Container used the latter, host the
+                // former (Missing key at ["text"] vs ["prompt"]). Fall back to the
+                // other shape so both servers work without container.
+                const isTextMissing = msg.includes('text') && msg.includes('Missing key');
+                // debug: console.warn('v2 prompt fallback check', msg.slice(0,120), {isTextMissing, isPromptMissing: msg.includes('prompt')});
+                const isPromptMissing = msg.includes('prompt') && msg.includes('Missing key');
+                if (isTextMissing || isPromptMissing) {
+                    const fallbackPayload: Record<string, unknown> = isTextMissing ? { ...prompt } : { prompt };
+                    try {
+                        const { data } = await this.fetchJson<{ data: Record<string, unknown> }>(
+                            `/api/session/${sessionId}/prompt`,
+                            {
+                                method: 'POST',
+                                body: JSON.stringify(fallbackPayload)
+                            }
+                        );
+                        return { data: data?.data };
+                    } catch (e2) {
+                        return { error: e2 as Error };
+                    }
                 }
-            );
-            return { data: data?.data };
+                return { error: err as Error };
+            }
         } catch (e) {
             return { error: e as Error };
         }

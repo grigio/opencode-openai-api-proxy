@@ -79,7 +79,7 @@ describe('Chat completions (modular)', () => {
         const res = await request(app)
             .post('/v1/chat/completions')
             .set('Authorization', 'Bearer test-password')
-            .send({ model: 'bad', messages: [{ role: 'user', content: 'hi' }] });
+            .send({ model: 'opencode/', messages: [{ role: 'user', content: 'hi' }] });
         expect(res.statusCode).toEqual(400);
     });
 

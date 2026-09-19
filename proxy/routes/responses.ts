@@ -42,7 +42,36 @@ import {
     SERVER_AGENT_TOOLS,
     AGENT_TOOLS_ENABLED
 } from '../utils.ts';
+import { isProviderAnonymous } from '../model-gateway.ts';
 import { logger } from '../logger.ts';
+
+function inferDirectoryFromPrompt(promptText?: string, systemText?: string): string | undefined {
+    const envDir = process.env.OPENCODE_PROJECT_DIR?.trim() || process.env.OPENCODE_CWD?.trim();
+    if (envDir && envDir.startsWith('/')) return envDir;
+    const combined = `${systemText || ''}\n${promptText || ''}`;
+    const m =
+        combined.match(/Current working directory:\s*([^\s\n'"]+)/i) ||
+        combined.match(/\bcwd\s*[:=]\s*([^\s\n'"]+)/i) ||
+        combined.match(/working dir(?:ectory)?\s*[:=]\s*([^\s\n'"]+)/i);
+    if (m && m[1] && m[1].startsWith('/')) {
+        return m[1].replace(/[.,;:'"]+$/, '');
+    }
+    return undefined;
+}
+
+function inferSessionDirectory(
+    req: Request,
+    fullPromptText?: string,
+    systemPrompt?: string
+): string | undefined {
+    // Header override (e.g. pi or custom clients can send cwd explicitly)
+    const headerDir =
+        (req.headers['x-working-directory'] as string | undefined) ||
+        (req.headers['x-project-directory'] as string | undefined) ||
+        (req.headers['x-cwd'] as string | undefined);
+    if (headerDir && headerDir.startsWith('/')) return headerDir;
+    return inferDirectoryFromPrompt(fullPromptText, systemPrompt);
+}
 
 function agentResponsesMessages(input: unknown, instructions: unknown): ChatMessage[] {
     const messages: ChatMessage[] = [];
@@ -137,7 +166,9 @@ async function handleToolsResponses(
         );
     }
 
-    const identityHeaders = zenDirectBaseUrl ? await getZenIdentityHeaders() : undefined;
+    const isAnonOpencode = providerId === 'opencode' && isProviderAnonymous(providerInfo);
+    const identityHeaders =
+        zenDirectBaseUrl || isAnonOpencode ? await getZenIdentityHeaders() : undefined;
     const { data, messagesUsed } = await callChatCompletionsWithImageFallback({
         ...providerInfo,
         messages,
@@ -147,9 +178,8 @@ async function handleToolsResponses(
         stream: false,
         signal: clientAbortSignal(req),
         ...sampling,
-        ...(zenDirectBaseUrl && identityHeaders
-            ? { baseUrl: zenDirectBaseUrl, apiKey: null, identityHeaders }
-            : {})
+        ...(identityHeaders ? { identityHeaders } : {}),
+        ...(zenDirectBaseUrl ? { baseUrl: zenDirectBaseUrl, apiKey: null } : {})
     });
 
     const choice: ChatCompletionChoice = data!.choices?.[0] || {};
@@ -346,7 +376,12 @@ async function responsesHandler(req: Request, res: Response): Promise<Response |
             if (!providerInfo)
                 return res.status(400).json(gatewayUnavailableError(providerId, modelId));
 
-            if (shouldUseZenDirect(providerInfo, providerId)) {
+            const isStreaming = !!(req.body as { stream?: boolean })?.stream;
+            const allowStreamingZen = process.env.ZEN_DIRECT_ENABLED === '1';
+            if (
+                shouldUseZenDirect(providerInfo, providerId) &&
+                (!isStreaming || allowStreamingZen)
+            ) {
                 logger.info(
                     `[zen-direct] ${providerId}/${modelId} responses anonymous free tier -> direct zen ${zenBaseUrl()} (rotated CLI identity)`
                 );
@@ -362,16 +397,21 @@ async function responsesHandler(req: Request, res: Response): Promise<Response |
                     );
                 } catch (caught) {
                     const zenError = caught as import('../types.ts').UpstreamErrorLike;
-                    if (isFreeTierError(zenError)) {
+                    const zenInfo = upstreamErrorInfo(zenError);
+                    if (
+                        isFreeTierError(zenError) ||
+                        zenInfo.statusCode === 403 ||
+                        zenInfo.type === 'access_denied'
+                    ) {
                         logger.warn(
-                            `[zen-direct] ${providerId}/${modelId} responses rejected with FreeTierError 403, falling back to server-agent (anonymous like opencode):`,
+                            `[zen-direct] ${providerId}/${modelId} responses rejected with ${zenInfo.type || 'FreeTierError'} (${zenInfo.statusCode || 403}), falling back to server-agent (anonymous like opencode):`,
                             zenError.message
                         );
                         // Fall through to server-agent for 403 – the gateway
                         // considers this not "within OpenCode", but the local
                         // server is, so delegate there like the official CLI.
                     } else {
-                        const info = upstreamErrorInfo(zenError);
+                        const info = zenInfo;
                         return res
                             .status(
                                 info.statusCode && info.statusCode >= 400 && info.statusCode < 600
@@ -388,6 +428,14 @@ async function responsesHandler(req: Request, res: Response): Promise<Response |
                             });
                     }
                 }
+            } else if (
+                shouldUseZenDirect(providerInfo, providerId) &&
+                isStreaming &&
+                !allowStreamingZen
+            ) {
+                logger.info(
+                    `[zen-direct] ${providerId}/${modelId} responses anonymous free tier streaming skipped (payg-blocked), using server-agent directly`
+                );
             }
             if (shouldUseAgentTools() || shouldUseServerAgent(providerInfo, providerId)) {
                 const via = shouldUseAgentTools()
@@ -433,7 +481,10 @@ async function responsesHandler(req: Request, res: Response): Promise<Response |
                     }
                     let agentSessionId = previousState?.sessionId;
                     if (!agentSessionId) {
-                        const sessionRes = await client.createSession();
+                        const dir = inferSessionDirectory(req, fullPromptText, systemWithTools);
+                        const sessionRes = await client.createSession(
+                            dir ? { directory: dir } : undefined
+                        );
                         agentSessionId = sessionRes.data?.id;
                         if (!agentSessionId) throw new Error('Failed to create session');
                     }
@@ -505,10 +556,14 @@ async function responsesHandler(req: Request, res: Response): Promise<Response |
                 );
             } catch (caught) {
                 const toolError = caught as import('../types.ts').UpstreamErrorLike;
+                const toolInfo = upstreamErrorInfo(toolError);
                 if (
-                    isFreeTierError(toolError) &&
                     providerId === 'opencode' &&
-                    toolError.message?.includes('403')
+                    isProviderAnonymous(providerInfo) &&
+                    (isFreeTierError(toolError) ||
+                        toolInfo.statusCode === 403 ||
+                        toolInfo.type === 'access_denied' ||
+                        toolError.message?.includes('403'))
                 ) {
                     logger.warn(
                         `[tool-calling] ${providerId}/${modelId} responses direct gateway FreeTierError 403, retrying via server-agent (anonymous like opencode):`,
@@ -535,7 +590,10 @@ async function responsesHandler(req: Request, res: Response): Promise<Response |
                         } catch {}
                         let agentSessionId = previousState?.sessionId;
                         if (!agentSessionId) {
-                            const sessionRes = await client.createSession();
+                            const dir = inferSessionDirectory(req, fullPromptText, systemWithTools);
+                            const sessionRes = await client.createSession(
+                                dir ? { directory: dir } : undefined
+                            );
                             agentSessionId = sessionRes.data?.id;
                             if (!agentSessionId) throw new Error('Failed to create session');
                         }
@@ -633,13 +691,6 @@ async function responsesHandler(req: Request, res: Response): Promise<Response |
             }
         }
 
-        let sessionId = previousState?.sessionId;
-        if (!sessionId) {
-            const sessionRes = await client.createSession();
-            sessionId = sessionRes.data?.id;
-            if (!sessionId) throw new Error('Failed to create session');
-        }
-
         const messages = normalizeResponsesInputToMessages({ input, instructions });
         if (messages.length === 0) {
             return res.status(400).json({
@@ -653,6 +704,14 @@ async function responsesHandler(req: Request, res: Response): Promise<Response |
 
         const { allParts, fullPromptText, systemPrompt } =
             await buildPromptPartsAndSystem(messages);
+
+        let sessionId = previousState?.sessionId;
+        if (!sessionId) {
+            const dir = inferSessionDirectory(req, fullPromptText, systemPrompt);
+            const sessionRes = await client.createSession(dir ? { directory: dir } : undefined);
+            sessionId = sessionRes.data?.id;
+            if (!sessionId) throw new Error('Failed to create session');
+        }
         const createdAt = Math.floor(Date.now() / 1000);
         const responseId = `resp_${crypto.randomUUID()}`;
         const outputMessageId = `msg_${crypto.randomUUID()}`;

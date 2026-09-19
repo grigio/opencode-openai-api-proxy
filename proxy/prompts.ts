@@ -21,14 +21,20 @@ type PromptPart = TextPartInput | FilePartInput;
 
 function parseModel(model: unknown): ModelRef | null {
     if (typeof model !== 'string') return null;
-    if (model.includes('/')) {
-        const separatorIndex = model.indexOf('/');
-        const providerId = model.slice(0, separatorIndex);
-        const modelId = model.slice(separatorIndex + 1);
+    const trimmed = model.trim();
+    if (!trimmed) return null;
+    if (trimmed.includes('/')) {
+        const separatorIndex = trimmed.indexOf('/');
+        const providerId = trimmed.slice(0, separatorIndex).trim();
+        const modelId = trimmed.slice(separatorIndex + 1).trim();
         if (!providerId || !modelId) return null;
         return { providerId, modelId };
     }
-    return null;
+    // Tolerate bare model ids (e.g. pi's native opencode catalog sends
+    // "mimo-v2.5-free" without provider prefix). Default to opencode provider
+    // so the proxy remains compatible with both OpenAI-style
+    // "provider/model" and pi's short ids.
+    return { providerId: 'opencode', modelId: trimmed };
 }
 
 async function buildPromptPartsAndSystem(

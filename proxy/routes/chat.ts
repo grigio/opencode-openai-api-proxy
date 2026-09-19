@@ -39,6 +39,7 @@ import {
     SERVER_AGENT_TOOLS,
     AGENT_TOOLS_ENABLED
 } from '../utils.ts';
+import { isProviderAnonymous } from '../model-gateway.ts';
 import { logger } from '../logger.ts';
 
 async function handleToolsChatCompletions(
@@ -83,6 +84,11 @@ async function handleToolsChatCompletions(
         return handleToolsChatCompletionsStream(req, res, providerInfo, providerId, modelId, body);
     }
 
+    const identityHeaders =
+        providerId === 'opencode' && isProviderAnonymous(providerInfo)
+            ? await getZenIdentityHeaders()
+            : undefined;
+
     const { data } = await callChatCompletionsWithImageFallback({
         ...providerInfo,
         messages: messages as ChatMessage[],
@@ -91,6 +97,7 @@ async function handleToolsChatCompletions(
         parallelToolCalls,
         stream: false,
         signal: clientAbortSignal(req),
+        identityHeaders,
         ...sampling
     });
 
@@ -259,6 +266,10 @@ async function handleToolsChatCompletionsStream(
         parallel_tool_calls?: boolean;
     };
     const sampling = normalizeSamplingParams(body as Record<string, unknown>);
+    const identityHeaders =
+        providerId === 'opencode' && isProviderAnonymous(providerInfo)
+            ? await getZenIdentityHeaders()
+            : undefined;
 
     return streamChatCompletionsWithResumption({
         req,
@@ -277,6 +288,7 @@ async function handleToolsChatCompletionsStream(
                 parallelToolCalls,
                 stream: true,
                 signal: clientAbortSignal(req),
+                identityHeaders,
                 ...sampling
             }) as Promise<{
                 stream: ReadableStream<Uint8Array>;
@@ -345,7 +357,17 @@ async function chatCompletionsHandler(req: Request, res: Response): Promise<Resp
             if (!providerInfo)
                 return res.status(400).json(gatewayUnavailableError(providerId, modelId));
 
-            if (shouldUseZenDirect(providerInfo, providerId)) {
+            // Streaming zen-direct cannot fallback cleanly once headers are sent
+            // (it retries 3 times with 403). For anonymous streaming, go
+            // directly to server-agent which is "within OpenCode" and always
+            // succeeds, avoiding the payg 403 waste. Tests can force zen for
+            // streaming by setting ZEN_DIRECT_ENABLED=1.
+            const isStreaming = !!(req.body as { stream?: boolean })?.stream;
+            const allowStreamingZen = process.env.ZEN_DIRECT_ENABLED === '1';
+            if (
+                shouldUseZenDirect(providerInfo, providerId) &&
+                (!isStreaming || allowStreamingZen)
+            ) {
                 logger.info(
                     `[zen-direct] ${providerId}/${modelId} chat anonymous free tier -> direct zen ${zenBaseUrl()} (rotated CLI identity)`
                 );
@@ -360,16 +382,25 @@ async function chatCompletionsHandler(req: Request, res: Response): Promise<Resp
                     );
                 } catch (caught) {
                     const zenError = caught as import('../types.ts').UpstreamErrorLike;
-                    if (isFreeTierError(zenError)) {
+                    const zenInfo = upstreamErrorInfo(zenError);
+                    // Pay-as-you-go (payg) / FreeTierError both indicate the
+                    // anonymous zen endpoint rejected tool calling. Any 403 for
+                    // anonymous opencode should fall back to server-agent,
+                    // which is "within OpenCode" and always succeeds.
+                    if (
+                        isFreeTierError(zenError) ||
+                        zenInfo.statusCode === 403 ||
+                        zenInfo.type === 'access_denied'
+                    ) {
                         logger.warn(
-                            `[zen-direct] ${providerId}/${modelId} rejected with FreeTierError (403), falling back to server-agent (anonymous like opencode):`,
+                            `[zen-direct] ${providerId}/${modelId} rejected with ${zenInfo.type || 'FreeTierError'} (${zenInfo.statusCode || 403}), falling back to server-agent (anonymous like opencode):`,
                             zenError.message
                         );
                         // Fall through to server-agent for 403 – the gateway
                         // considers this not "within OpenCode", but the local
                         // server is, so delegate there like the official CLI.
                     } else {
-                        const info = upstreamErrorInfo(zenError);
+                        const info = zenInfo;
                         return res
                             .status(
                                 info.statusCode && info.statusCode >= 400 && info.statusCode < 600
@@ -386,6 +417,14 @@ async function chatCompletionsHandler(req: Request, res: Response): Promise<Resp
                             });
                     }
                 }
+            } else if (
+                shouldUseZenDirect(providerInfo, providerId) &&
+                isStreaming &&
+                !allowStreamingZen
+            ) {
+                logger.info(
+                    `[zen-direct] ${providerId}/${modelId} chat anonymous free tier streaming skipped (payg-blocked), using server-agent directly`
+                );
             }
             if (shouldUseAgentTools() || shouldUseServerAgent(providerInfo, providerId)) {
                 const via = shouldUseAgentTools()
@@ -472,10 +511,15 @@ async function chatCompletionsHandler(req: Request, res: Response): Promise<Resp
                 // Anonymous free-tier 403 must not be surfaced as 502 – retry
                 // via the server-agent which is "within OpenCode" and succeeds
                 // like the official CLI, instead of exposing the upstream 403.
+                // Handles both legacy FreeTierError and new payg/access_denied.
+                const toolInfo = upstreamErrorInfo(toolError);
                 if (
-                    isFreeTierError(toolError) &&
                     providerId === 'opencode' &&
-                    toolError.message?.includes('403')
+                    isProviderAnonymous(providerInfo) &&
+                    (isFreeTierError(toolError) ||
+                        toolInfo.statusCode === 403 ||
+                        toolInfo.type === 'access_denied' ||
+                        toolError.message?.includes('403'))
                 ) {
                     logger.warn(
                         `[tool-calling] ${providerId}/${modelId} direct gateway FreeTierError 403, retrying via server-agent (anonymous like opencode):`,
